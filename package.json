@@ -1,0 +1,89 @@
+{
+  "name": "@unicitylabs/nostr-sdk",
+  "version": "1.0.0",
+  "description": "Unicity Nostr SDK - Token transfers and nametag bindings over Nostr protocol",
+  "license": "MIT",
+  "author": "Unicity Labs",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/unicitylabs/unicity-nostr-js-sdk"
+  },
+  "keywords": [
+    "nostr",
+    "unicity",
+    "token",
+    "blockchain",
+    "cryptocurrency",
+    "websocket",
+    "schnorr",
+    "bip340"
+  ],
+  "type": "module",
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "browser": "./dist/browser/index.js",
+  "types": "./dist/types/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/types/index.d.ts",
+        "default": "./dist/esm/index.js"
+      },
+      "require": {
+        "types": "./dist/types/index.d.ts",
+        "default": "./dist/cjs/index.js"
+      },
+      "browser": {
+        "types": "./dist/types/index.d.ts",
+        "default": "./dist/browser/index.js"
+      }
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "npm run build:esm && npm run build:cjs && npm run build:browser && npm run build:types",
+    "build:esm": "tsc -p tsconfig.esm.json",
+    "build:cjs": "tsc -p tsconfig.cjs.json",
+    "build:browser": "rollup -c rollup.config.js",
+    "build:types": "tsc -p tsconfig.types.json",
+    "build:check": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:unit": "vitest run --testPathPattern=unit",
+    "test:integration": "vitest run --testPathPattern=integration",
+    "test:coverage": "vitest run --coverage",
+    "lint": "eslint src --ext .ts",
+    "lint:fix": "eslint src --ext .ts --fix",
+    "prepublishOnly": "npm run clean && npm run build && npm test"
+  },
+  "dependencies": {
+    "@noble/curves": "^1.6.0",
+    "@noble/hashes": "^1.5.0",
+    "@scure/base": "^1.1.9",
+    "libphonenumber-js": "^1.11.14"
+  },
+  "devDependencies": {
+    "@rollup/plugin-commonjs": "^28.0.1",
+    "@rollup/plugin-node-resolve": "^15.3.0",
+    "@rollup/plugin-terser": "^0.4.4",
+    "@rollup/plugin-typescript": "^12.1.1",
+    "@types/node": "^22.9.0",
+    "@types/ws": "^8.18.1",
+    "@typescript-eslint/eslint-plugin": "^8.14.0",
+    "@typescript-eslint/parser": "^8.14.0",
+    "eslint": "^9.14.0",
+    "rollup": "^4.27.2",
+    "tslib": "^2.8.1",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.5",
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
