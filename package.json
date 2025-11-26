@@ -1,5 +1,5 @@
 {
-  "name": "@unicitylabs/nostr-sdk",
+  "name": "@unicitylabs/nostr-js-sdk",
   "version": "1.0.0",
   "description": "Unicity Nostr SDK - Token transfers and nametag bindings over Nostr protocol",
   "license": "MIT",
