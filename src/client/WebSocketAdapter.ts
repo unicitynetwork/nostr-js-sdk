@@ -58,7 +58,8 @@ export async function createWebSocket(url: string): Promise<IWebSocket> {
 
   // Node.js environment - dynamically import ws
   try {
-    const { default: WS } = await import('ws');
+    // @vite-ignore
+    const { default: WS } = await import(/* @vite-ignore */ 'ws');
     return new WS(url) as unknown as IWebSocket;
   } catch {
     throw new Error(
