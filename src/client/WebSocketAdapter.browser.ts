@@ -1,6 +1,6 @@
 /**
- * WebSocketAdapter - Cross-platform WebSocket implementation.
- * Provides a unified interface for WebSocket connections in Node.js and browsers.
+ * WebSocketAdapter - Browser implementation.
+ * Uses the native WebSocket API.
  */
 
 /**
@@ -46,30 +46,19 @@ export const CLOSING = 2;
 export const CLOSED = 3;
 
 /**
- * Create a WebSocket connection that works in both Node.js and browsers.
+ * Create a WebSocket connection using native browser WebSocket.
  * @param url WebSocket URL (ws:// or wss://)
  * @returns WebSocket instance
  */
 export async function createWebSocket(url: string): Promise<IWebSocket> {
-  // Check if we're in a browser environment
-  if (typeof WebSocket !== 'undefined') {
-    return new WebSocket(url) as unknown as IWebSocket;
+  if (typeof WebSocket === 'undefined') {
+    throw new Error('WebSocket not available in this environment');
   }
-
-  // Node.js environment - dynamically import ws
-  try {
-    const { default: WS } = await import('ws');
-    return new WS(url) as unknown as IWebSocket;
-  } catch {
-    throw new Error(
-      'WebSocket not available. In Node.js, install the "ws" package: npm install ws'
-    );
-  }
+  return new WebSocket(url) as unknown as IWebSocket;
 }
 
 /**
  * Extract string data from WebSocket message event.
- * Handles different message types across platforms.
  * @param event WebSocket message event
  * @returns String message data
  */
@@ -81,12 +70,7 @@ export function extractMessageData(event: WebSocketMessageEvent): string {
     return new TextDecoder().decode(event.data);
   }
   if (typeof Blob !== 'undefined' && event.data instanceof Blob) {
-    // This shouldn't happen in normal Nostr relay communication
     throw new Error('Blob messages are not supported');
-  }
-  // Node.js Buffer case
-  if (Buffer && Buffer.isBuffer(event.data)) {
-    return (event.data as Buffer).toString('utf-8');
   }
   return String(event.data);
 }
