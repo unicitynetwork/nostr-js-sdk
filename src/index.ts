@@ -37,8 +37,10 @@ export * from './nametag/index.js';
 export { NametagUtils, NametagBinding } from './nametag/index.js';
 
 // Token transfer
-export * from './token/index.js';
 export { TokenTransferProtocol } from './token/index.js';
+
+// Payment requests
+export { PaymentRequestProtocol } from './payment/index.js';
 
 // Re-export common types for convenience
 export type {
@@ -65,3 +67,8 @@ export type {
   WebSocketCloseEvent,
   WebSocketErrorEvent,
 } from './client/WebSocketAdapter.js';
+
+export type {
+  PaymentRequest,
+  ParsedPaymentRequest,
+} from './payment/PaymentRequestProtocol.js';

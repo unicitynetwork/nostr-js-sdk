@@ -11,6 +11,7 @@ import {
   NametagUtils,
   NametagBinding,
   TokenTransferProtocol,
+  PaymentRequestProtocol,
 } from '../../src/index.js';
 
 describe('E2E: Key Management', () => {
@@ -294,6 +295,115 @@ describe('E2E: Filter Building', () => {
     expect(json.since).toBe(dayAgo);
     expect(json.until).toBe(now);
     expect(json.limit).toBe(100);
+  });
+});
+
+describe('E2E: Payment Request', () => {
+  it('should complete payment request workflow', async () => {
+    const requester = NostrKeyManager.generate();
+    const target = NostrKeyManager.generate();
+
+    // Solana coin ID (example)
+    const SOLANA_COIN_ID = 'dee5f8ce778562eec90e9c38a91296a023210ccc76ff4c29d527ac3eb64ade93';
+
+    // Create payment request
+    const request = {
+      amount: BigInt(1_000_000_000), // 1 SOL (9 decimals)
+      coinId: SOLANA_COIN_ID,
+      message: 'Payment for services rendered',
+      recipientNametag: 'alice-merchant',
+    };
+
+    // Create payment request event
+    const event = await PaymentRequestProtocol.createPaymentRequestEvent(
+      requester,
+      target.getPublicKeyHex(),
+      request
+    );
+
+    // Verify event structure
+    expect(event.kind).toBe(EventKinds.PAYMENT_REQUEST);
+    expect(event.verify()).toBe(true);
+    expect(PaymentRequestProtocol.isPaymentRequest(event)).toBe(true);
+    expect(PaymentRequestProtocol.getTarget(event)).toBe(target.getPublicKeyHex());
+    expect(PaymentRequestProtocol.getSender(event)).toBe(requester.getPublicKeyHex());
+    expect(PaymentRequestProtocol.getAmount(event)).toBe(BigInt(1_000_000_000));
+    expect(PaymentRequestProtocol.getRecipientNametag(event)).toBe('alice-merchant');
+
+    // Target parses the request
+    const parsed = await PaymentRequestProtocol.parsePaymentRequest(event, target);
+
+    expect(parsed.amount).toBe(BigInt(1_000_000_000));
+    expect(parsed.coinId).toBe(SOLANA_COIN_ID);
+    expect(parsed.message).toBe('Payment for services rendered');
+    expect(parsed.recipientNametag).toBe('alice-merchant');
+    expect(parsed.senderPubkey).toBe(requester.getPublicKeyHex());
+
+    // Requester can also verify (to check what was sent)
+    const requesterParsed = await PaymentRequestProtocol.parsePaymentRequest(event, requester);
+    expect(requesterParsed.amount).toBe(parsed.amount);
+    expect(requesterParsed.recipientNametag).toBe(parsed.recipientNametag);
+  });
+
+  it('should handle multiple payment requests', async () => {
+    const merchant = NostrKeyManager.generate();
+    const customer = NostrKeyManager.generate();
+
+    const SOLANA_COIN_ID = 'dee5f8ce778562eec90e9c38a91296a023210ccc76ff4c29d527ac3eb64ade93';
+
+    const requests = [
+      { amount: BigInt(500_000_000), message: 'Coffee' },
+      { amount: BigInt(1_500_000_000), message: 'Lunch' },
+      { amount: BigInt(10_000_000_000), message: 'Subscription' },
+    ];
+
+    const events = [];
+    for (const req of requests) {
+      const event = await PaymentRequestProtocol.createPaymentRequestEvent(
+        merchant,
+        customer.getPublicKeyHex(),
+        {
+          ...req,
+          coinId: SOLANA_COIN_ID,
+          recipientNametag: 'merchant-store',
+        }
+      );
+      events.push(event);
+    }
+
+    // All events should be valid
+    for (let i = 0; i < events.length; i++) {
+      expect(events[i].verify()).toBe(true);
+      const parsed = await PaymentRequestProtocol.parsePaymentRequest(events[i], customer);
+      expect(parsed.amount).toBe(requests[i].amount);
+      expect(parsed.message).toBe(requests[i].message);
+    }
+  });
+
+  it('should format and display amounts correctly', () => {
+    // Test amount formatting with different decimal places
+    expect(PaymentRequestProtocol.formatAmount(BigInt(1_000_000_000), 9)).toBe('1');     // 9 decimals (SOL)
+    expect(PaymentRequestProtocol.formatAmount(BigInt(500_000_000), 9)).toBe('0.5');     // 9 decimals (SOL)
+    expect(PaymentRequestProtocol.formatAmount(BigInt(1_000_000), 9)).toBe('0.001');     // 9 decimals (SOL)
+    expect(PaymentRequestProtocol.formatAmount(BigInt(100_000_000), 8)).toBe('1');       // 8 decimals (BTC)
+    expect(PaymentRequestProtocol.formatAmount(BigInt(1_000_000), 6)).toBe('1');         // 6 decimals (USDC)
+  });
+
+  it('should work with subscription filters', () => {
+    const customer = NostrKeyManager.generate();
+
+    // Create filter for incoming payment requests
+    const filter = Filter.builder()
+      .kinds(EventKinds.PAYMENT_REQUEST)
+      .pTags(customer.getPublicKeyHex())
+      .since(Math.floor(Date.now() / 1000) - 3600)
+      .build();
+
+    const json = filter.toJSON();
+
+    expect(json.kinds).toContain(EventKinds.PAYMENT_REQUEST);
+    expect(json['#p']).toContain(customer.getPublicKeyHex());
+    expect(json.since).toBeDefined();
   });
 });
 

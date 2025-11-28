@@ -53,6 +53,9 @@ export const TOKEN_TRANSFER = 31113;
 /** Unicity: File metadata */
 export const FILE_METADATA = 31114;
 
+/** Unicity: Payment request */
+export const PAYMENT_REQUEST = 31115;
+
 // ============================================================================
 // Event Kind Classification Functions
 // ============================================================================
@@ -124,6 +127,8 @@ export function getName(kind: number): string {
       return 'Token Transfer';
     case FILE_METADATA:
       return 'File Metadata';
+    case PAYMENT_REQUEST:
+      return 'Payment Request';
     default:
       if (isReplaceable(kind)) {
         return `Replaceable (${kind})`;

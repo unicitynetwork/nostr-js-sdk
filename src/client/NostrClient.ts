@@ -489,6 +489,31 @@ export class NostrClient {
   }
 
   /**
+   * Send a payment request to a target (encrypted).
+   * @param targetPubkeyHex Target's public key (who should pay)
+   * @param request Payment request details
+   * @returns Promise that resolves with the event ID
+   */
+  async sendPaymentRequest(
+    targetPubkeyHex: string,
+    request: {
+      amount: bigint | number;
+      coinId: string;
+      message?: string;
+      recipientNametag: string;
+      requestId?: string;
+    }
+  ): Promise<string> {
+    const PaymentRequestProtocol = await import('../payment/PaymentRequestProtocol.js');
+    const event = await PaymentRequestProtocol.createPaymentRequestEvent(
+      this.keyManager,
+      targetPubkeyHex,
+      request
+    );
+    return this.publishEvent(event);
+  }
+
+  /**
    * Publish a nametag binding.
    * @param nametagId Nametag identifier
    * @param unicityAddress Unicity address

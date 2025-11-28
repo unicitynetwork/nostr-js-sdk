@@ -6,7 +6,7 @@
   "author": "Unicity Labs",
   "repository": {
     "type": "git",
-    "url": "https://github.com/unicitylabs/unicity-nostr-js-sdk"
+    "url": "https://github.com/unicitynetwork/nostr-js-sdk"
   },
   "keywords": [
     "nostr",
@@ -56,8 +56,8 @@
     "clean": "rm -rf dist",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:unit": "vitest run --testPathPattern=unit",
-    "test:integration": "vitest run --testPathPattern=integration",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration",
     "test:coverage": "vitest run --coverage",
     "lint": "eslint src --ext .ts",
     "lint:fix": "eslint src --ext .ts --fix",

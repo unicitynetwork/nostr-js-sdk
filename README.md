@@ -9,6 +9,7 @@ A TypeScript SDK for Nostr protocol with Unicity extensions. Works in both Node.
 - **GZIP Compression** - Automatic compression for large messages (>1KB)
 - **Multi-Relay Support** - Connect to multiple relays with automatic reconnection
 - **Token Transfers** - Encrypted Unicity token transfers over Nostr
+- **Payment Requests** - Request payments from other users via encrypted Nostr messages
 - **Nametag Bindings** - Privacy-preserving identity bindings (phone numbers, usernames)
 - **Cross-Platform** - Works in Node.js 18+ and modern browsers
 
@@ -130,6 +131,46 @@ await client.publishEvent(event);
 const tokenJson = await TokenTransferProtocol.parseTokenTransfer(event, keyManager);
 ```
 
+### Payment Requests
+
+```typescript
+import { NostrClient, PaymentRequestProtocol } from '@unicitylabs/nostr-sdk';
+
+// Send a payment request
+const targetPubkey = await client.queryPubkeyByNametag('bob');
+
+const eventId = await client.sendPaymentRequest(targetPubkey, {
+  amount: BigInt(1_000_000_000),  // 1 SOL (9 decimals)
+  coinId: 'f8aa1383...',          // Coin ID (hex) - precisely defines the token
+  message: 'Payment for coffee',
+  recipientNametag: 'alice',      // Your nametag (where to receive payment)
+});
+
+// Subscribe to incoming payment requests
+const filter = Filter.builder()
+  .kinds(EventKinds.PAYMENT_REQUEST)
+  .pTags(keyManager.getPublicKeyHex())
+  .build();
+
+client.subscribe(filter, {
+  onEvent: async (event) => {
+    const request = await PaymentRequestProtocol.parsePaymentRequest(event, keyManager);
+    console.log(`Payment request: ${request.amount}`);
+    console.log(`Coin ID: ${request.coinId}`);
+    console.log(`Pay to: ${request.recipientNametag}`);
+    console.log(`Message: ${request.message}`);
+  },
+});
+
+// Format amounts for display (with decimals parameter)
+PaymentRequestProtocol.formatAmount(BigInt(1_500_000_000), 9); // "1.5" (9 decimals for SOL)
+PaymentRequestProtocol.formatAmount(BigInt(150_000_000), 8);   // "1.5" (8 decimals - default)
+
+// Parse amounts from strings
+PaymentRequestProtocol.parseAmount('1.5', 9); // BigInt(1_500_000_000) (9 decimals for SOL)
+PaymentRequestProtocol.parseAmount('1.5', 8); // BigInt(150_000_000) (8 decimals - default)
+```
+
 ### Nametag Bindings
 
 ```typescript
@@ -212,6 +253,65 @@ TokenTransferProtocol.getRecipient(event); // string | undefined
 TokenTransferProtocol.getSender(event);    // string
 ```
 
+## Payment Request Format
+
+Payment requests use Nostr event kind 31115 with NIP-04 encryption.
+
+### Event Structure
+
+```json
+{
+  "id": "<sha256_event_hash>",
+  "pubkey": "<requester_pubkey_hex>",
+  "created_at": 1234567890,
+  "kind": 31115,
+  "tags": [
+    ["p", "<target_pubkey_hex>"],
+    ["type", "payment_request"],
+    ["amount", "1000000000"],
+    ["recipient", "alice"]
+  ],
+  "content": "<NIP-04 encrypted content>",
+  "sig": "<schnorr_signature_hex>"
+}
+```
+
+### Tags
+
+| Tag | Required | Description |
+|-----|----------|-------------|
+| `p` | Yes | Target's public key (who should pay) |
+| `type` | Yes | Always `"payment_request"` |
+| `amount` | Yes | Amount in smallest units (for filtering) |
+| `recipient` | No | Recipient nametag (where to send payment) |
+
+### Encrypted Content
+
+The `content` field is NIP-04 encrypted. When decrypted:
+
+```
+payment_request:{"amount":"1000000000","coinId":"...","message":"...","recipientNametag":"alice","requestId":"a1b2c3d4"}
+```
+
+Note: The `coinId` precisely identifies the token type, so no separate symbol field is needed.
+
+### Helper Functions
+
+```typescript
+// Check if event is a payment request
+PaymentRequestProtocol.isPaymentRequest(event); // boolean
+
+// Get metadata from tags
+PaymentRequestProtocol.getAmount(event);           // bigint | undefined
+PaymentRequestProtocol.getRecipientNametag(event); // string | undefined
+PaymentRequestProtocol.getTarget(event);           // string | undefined
+PaymentRequestProtocol.getSender(event);           // string
+
+// Parse full request (requires decryption)
+const parsed = await PaymentRequestProtocol.parsePaymentRequest(event, keyManager);
+// Returns: { amount, coinId, message, recipientNametag, requestId, senderPubkey, timestamp, eventId }
+```
+
 ## Browser Usage
 
 ### ES Modules
@@ -255,6 +355,7 @@ TokenTransferProtocol.getSender(event);    // string
 - **NametagUtils** - Nametag normalization and hashing
 - **NametagBinding** - Nametag binding event creation
 - **TokenTransferProtocol** - Token transfer protocol
+- **PaymentRequestProtocol** - Payment request protocol
 
 ## Event Kinds
 
@@ -263,8 +364,12 @@ TokenTransferProtocol.getSender(event);    // string
 | 0 | PROFILE | User profile metadata |
 | 1 | TEXT_NOTE | Short text note |
 | 4 | ENCRYPTED_DM | Encrypted direct message |
-| 30078 | APP_DATA | Application-specific data |
+| 30078 | APP_DATA | Application-specific data (nametag bindings) |
+| 31111 | AGENT_PROFILE | Agent profile information |
+| 31112 | AGENT_LOCATION | Agent GPS location |
 | 31113 | TOKEN_TRANSFER | Unicity token transfer |
+| 31114 | FILE_METADATA | File metadata |
+| 31115 | PAYMENT_REQUEST | Payment request |
 
 ## Development
 
@@ -284,6 +389,27 @@ npm run build
 # Lint
 npm run lint
 ```
+
+## E2E Testing with Relay
+
+To test payment requests against a real wallet:
+
+```bash
+# Send a single payment request
+TARGET_NAMETAG=mp-6 npm test -- --testNamePattern="send single payment request"
+
+# Send multiple payment requests (for UI testing)
+TARGET_NAMETAG=mp-6 npm test -- --testNamePattern="send multiple payment requests"
+
+# Full flow with token transfer verification (requires wallet interaction)
+TARGET_NAMETAG=mp-6 npm test -- --testNamePattern="full payment request flow"
+```
+
+Environment variables:
+- `TARGET_NAMETAG` - Nametag of the wallet to send requests to (required)
+- `NOSTR_RELAY` - Relay URL (default: `ws://51.112.154.161:8080`)
+- `AMOUNT` - Amount in smallest units (default: `1000000`)
+- `TIMEOUT` - Timeout in seconds for full flow test (default: `120`)
 
 ## License
 
