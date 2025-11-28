@@ -16,7 +16,7 @@
  *
  * Environment variables:
  *   TARGET_NAMETAG - Nametag of the wallet to send requests to (required)
- *   NOSTR_RELAY - Relay URL (default: ws://51.112.154.161:8080)
+ *   NOSTR_RELAY - Relay URL (default: wss://nostr-relay.testnet.unicity.network)
  *   AMOUNT - Amount in smallest units (default: 1000000)
  *   SYMBOL - Token symbol (default: SOL)
  *   TIMEOUT - Timeout in seconds for full flow test (default: 120)
@@ -37,7 +37,7 @@ const TARGET_NAMETAG = process.env.TARGET_NAMETAG;
 const SKIP_RELAY_TESTS = !TARGET_NAMETAG;
 
 // Configuration
-const NOSTR_RELAY = process.env.NOSTR_RELAY || 'ws://51.112.154.161:8080';
+const NOSTR_RELAY = process.env.NOSTR_RELAY || 'wss://nostr-relay.testnet.unicity.network';
 const SOLANA_COIN_ID = 'dee5f8ce778562eec90e9c38a91296a023210ccc76ff4c29d527ac3eb64ade93';
 
 describe.skipIf(SKIP_RELAY_TESTS)('Payment Request - Relay E2E', () => {

@@ -407,7 +407,7 @@ TARGET_NAMETAG=mp-6 npm test -- --testNamePattern="full payment request flow"
 
 Environment variables:
 - `TARGET_NAMETAG` - Nametag of the wallet to send requests to (required)
-- `NOSTR_RELAY` - Relay URL (default: `ws://51.112.154.161:8080`)
+- `NOSTR_RELAY` - Relay URL (default: `wss://nostr-relay.testnet.unicity.network`)
 - `AMOUNT` - Amount in smallest units (default: `1000000`)
 - `TIMEOUT` - Timeout in seconds for full flow test (default: `120`)
 
