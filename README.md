@@ -4,8 +4,10 @@ A TypeScript SDK for Nostr protocol with Unicity extensions. Works in both Node.
 
 ## Features
 
+- **NIP-17 Private Messages** - Gift-wrapped private direct messages with sender anonymity
+- **NIP-44 Encryption** - Modern ChaCha20-Poly1305 AEAD encryption with HKDF
 - **BIP-340 Schnorr Signatures** - Full support for secp256k1 Schnorr signatures
-- **NIP-04 Encryption** - AES-256-CBC encryption with ECDH key agreement
+- **NIP-04 Encryption** - Legacy AES-256-CBC encryption with ECDH key agreement
 - **GZIP Compression** - Automatic compression for large messages (>1KB)
 - **Multi-Relay Support** - Connect to multiple relays with automatic reconnection
 - **Token Transfers** - Encrypted Unicity token transfers over Nostr
@@ -73,7 +75,7 @@ const event = Event.create(keyManager, {
 const eventId = await client.publishEvent(event);
 ```
 
-### Encrypted Direct Messages
+### Encrypted Direct Messages (NIP-04 Legacy)
 
 ```typescript
 // Send encrypted DM
@@ -83,6 +85,67 @@ await client.publishEncryptedMessage(recipientPubkey, 'Secret message');
 // Or encrypt manually
 const encrypted = await keyManager.encryptHex('Hello!', recipientPubkey);
 const decrypted = await keyManager.decryptHex(encrypted, senderPubkey);
+```
+
+### NIP-17 Private Messages (Recommended)
+
+NIP-17 provides enhanced privacy using gift-wrapping with ephemeral keys:
+
+```typescript
+// Send private message by nametag (auto-resolves to pubkey)
+const eventId = await client.sendPrivateMessageToNametag(
+  'alice',                              // recipient nametag
+  'Hello, this is a private message!'
+);
+
+// Or send by pubkey directly
+const recipientPubkey = '...';
+const eventId = await client.sendPrivateMessage(
+  recipientPubkey,
+  'Hello, this is a private message!'
+);
+
+// Send reply to a previous message
+const eventId = await client.sendPrivateMessage(
+  recipientPubkey,
+  'This is a reply!',
+  { replyToEventId: originalEventId }
+);
+
+// Send read receipt
+await client.sendReadReceipt(senderPubkey, messageEventId);
+```
+
+Receive and unwrap private messages:
+
+```typescript
+import { Filter, EventKinds } from '@unicitylabs/nostr-sdk';
+
+// Subscribe to gift-wrapped messages
+const filter = Filter.builder()
+  .kinds(EventKinds.GIFT_WRAP)
+  .pTags(keyManager.getPublicKeyHex())
+  .build();
+
+client.subscribe(filter, {
+  onEvent: (event) => {
+    try {
+      const message = client.unwrapPrivateMessage(event);
+
+      if (message.kind === EventKinds.CHAT_MESSAGE) {
+        console.log('From:', message.senderPubkey);
+        console.log('Content:', message.content);
+
+        // Send read receipt
+        client.sendReadReceipt(message.senderPubkey, message.eventId);
+      } else if (message.kind === EventKinds.READ_RECEIPT) {
+        console.log('Read receipt for:', message.replyToEventId);
+      }
+    } catch (e) {
+      // Message not for us or decryption failed
+    }
+  },
+});
 ```
 
 ### Subscriptions
@@ -350,7 +413,9 @@ const parsed = await PaymentRequestProtocol.parsePaymentRequest(event, keyManage
 
 - **Bech32** - Bech32 encoding/decoding (npub, nsec)
 - **SchnorrSigner** - BIP-340 Schnorr signatures
-- **NIP04** - NIP-04 encryption/decryption
+- **NIP04** - NIP-04 encryption/decryption (legacy)
+- **NIP44** - NIP-44 encryption/decryption (ChaCha20-Poly1305)
+- **NIP17** - NIP-17 private direct messages with gift-wrapping
 - **EventKinds** - Event kind constants
 - **NametagUtils** - Nametag normalization and hashing
 - **NametagBinding** - Nametag binding event creation
@@ -363,7 +428,11 @@ const parsed = await PaymentRequestProtocol.parsePaymentRequest(event, keyManage
 |------|------|-------------|
 | 0 | PROFILE | User profile metadata |
 | 1 | TEXT_NOTE | Short text note |
-| 4 | ENCRYPTED_DM | Encrypted direct message |
+| 4 | ENCRYPTED_DM | Encrypted direct message (NIP-04) |
+| 13 | SEAL | Encrypted seal for gift-wrapping (NIP-17) |
+| 14 | CHAT_MESSAGE | Private direct message rumor (NIP-17) |
+| 15 | READ_RECEIPT | Read receipt rumor (NIP-17) |
+| 1059 | GIFT_WRAP | Gift-wrapped message (NIP-17) |
 | 30078 | APP_DATA | Application-specific data (nametag bindings) |
 | 31111 | AGENT_PROFILE | Agent profile information |
 | 31112 | AGENT_LOCATION | Agent GPS location |
@@ -392,6 +461,18 @@ npm run lint
 
 ## E2E Testing with Relay
 
+### NIP-17 Private Messages
+
+```bash
+# Run NIP-17 E2E tests against real relay
+npm test tests/integration/nip17-relay.test.ts
+
+# Use a custom relay
+NOSTR_TEST_RELAY=wss://your-relay.com npm test tests/integration/nip17-relay.test.ts
+```
+
+### Payment Requests (Manual)
+
 To test payment requests against a real wallet:
 
 ```bash
@@ -407,7 +488,7 @@ TARGET_NAMETAG=mp-6 npm test -- --testNamePattern="full payment request flow"
 
 Environment variables:
 - `TARGET_NAMETAG` - Nametag of the wallet to send requests to (required)
-- `NOSTR_RELAY` - Relay URL (default: `wss://nostr-relay.testnet.unicity.network`)
+- `NOSTR_TEST_RELAY` - Relay URL (default: `wss://nostr-relay.testnet.unicity.network`)
 - `AMOUNT` - Amount in smallest units (default: `1000000`)
 - `TIMEOUT` - Timeout in seconds for full flow test (default: `120`)
 

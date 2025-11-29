@@ -15,6 +15,8 @@ import {
   OPEN,
   CLOSED,
 } from './WebSocketAdapter.js';
+import * as NIP17 from '../messaging/nip17.js';
+import type { PrivateMessage, PrivateMessageOptions } from '../messaging/types.js';
 
 /** Connection timeout in milliseconds */
 const CONNECTION_TIMEOUT_MS = 30000;
@@ -650,5 +652,75 @@ export class NostrClient {
   async createAndPublishEvent(data: UnsignedEventData): Promise<string> {
     const event = Event.create(this.keyManager, data);
     return this.publishEvent(event);
+  }
+
+  // ========== NIP-17 Private Messages ==========
+
+  /**
+   * Send a private message using NIP-17 gift-wrapping.
+   * @param recipientPubkeyHex Recipient's public key (hex)
+   * @param message Message content
+   * @param options Optional message options (reply-to, etc.)
+   * @returns Promise that resolves with the gift wrap event ID
+   */
+  async sendPrivateMessage(
+    recipientPubkeyHex: string,
+    message: string,
+    options?: PrivateMessageOptions
+  ): Promise<string> {
+    const giftWrap = NIP17.createGiftWrap(
+      this.keyManager,
+      recipientPubkeyHex,
+      message,
+      options
+    );
+    return this.publishEvent(giftWrap);
+  }
+
+  /**
+   * Send a private message to a recipient identified by their nametag.
+   * Resolves the nametag to a pubkey automatically.
+   * @param recipientNametag Recipient's nametag (Unicity ID)
+   * @param message Message content
+   * @param options Optional message options (reply-to, etc.)
+   * @returns Promise that resolves with the gift wrap event ID
+   */
+  async sendPrivateMessageToNametag(
+    recipientNametag: string,
+    message: string,
+    options?: PrivateMessageOptions
+  ): Promise<string> {
+    const pubkey = await this.queryPubkeyByNametag(recipientNametag);
+    if (!pubkey) {
+      throw new Error(`Nametag not found: ${recipientNametag}`);
+    }
+    return this.sendPrivateMessage(pubkey, message, options);
+  }
+
+  /**
+   * Send a read receipt for a message using NIP-17 gift-wrapping.
+   * @param recipientPubkeyHex Recipient (original sender) public key
+   * @param messageEventId Event ID of the message being acknowledged
+   * @returns Promise that resolves with the gift wrap event ID
+   */
+  async sendReadReceipt(
+    recipientPubkeyHex: string,
+    messageEventId: string
+  ): Promise<string> {
+    const giftWrap = NIP17.createReadReceipt(
+      this.keyManager,
+      recipientPubkeyHex,
+      messageEventId
+    );
+    return this.publishEvent(giftWrap);
+  }
+
+  /**
+   * Unwrap a gift-wrapped private message.
+   * @param giftWrap Gift wrap event (kind 1059)
+   * @returns Parsed private message
+   */
+  unwrapPrivateMessage(giftWrap: Event): PrivateMessage {
+    return NIP17.unwrap(giftWrap, this.keyManager);
   }
 }

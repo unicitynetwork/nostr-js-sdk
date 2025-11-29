@@ -25,6 +25,15 @@ export const ENCRYPTED_DM = 4;
 /** NIP-09: Event deletion */
 export const DELETION = 5;
 
+/** NIP-17: Seal (signed, encrypted rumor) */
+export const SEAL = 13;
+
+/** NIP-17: Private chat message (rumor - unsigned inner event) */
+export const CHAT_MESSAGE = 14;
+
+/** NIP-17: Read receipt (rumor kind) */
+export const READ_RECEIPT = 15;
+
 /** NIP-25: Reactions (likes, etc.) */
 export const REACTION = 7;
 
@@ -111,6 +120,12 @@ export function getName(kind: number): string {
       return 'Encrypted DM';
     case DELETION:
       return 'Deletion';
+    case SEAL:
+      return 'Seal';
+    case CHAT_MESSAGE:
+      return 'Chat Message';
+    case READ_RECEIPT:
+      return 'Read Receipt';
     case REACTION:
       return 'Reaction';
     case GIFT_WRAP:

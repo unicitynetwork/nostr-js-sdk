@@ -23,6 +23,7 @@ export {
   Bech32,
   SchnorrSigner,
   NIP04,
+  NIP44,
 } from './crypto/index.js';
 
 // Protocol types and classes
@@ -41,6 +42,10 @@ export { TokenTransferProtocol } from './token/index.js';
 
 // Payment requests
 export { PaymentRequestProtocol } from './payment/index.js';
+
+// NIP-17 Private messaging
+export * from './messaging/index.js';
+export * as NIP17 from './messaging/nip17.js';
 
 // Re-export common types for convenience
 export type {
@@ -72,3 +77,9 @@ export type {
   PaymentRequest,
   ParsedPaymentRequest,
 } from './payment/PaymentRequestProtocol.js';
+
+export type {
+  Rumor,
+  PrivateMessage,
+  PrivateMessageOptions,
+} from './messaging/types.js';

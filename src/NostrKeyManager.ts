@@ -7,6 +7,7 @@ import { bytesToHex, hexToBytes, randomBytes } from '@noble/hashes/utils';
 import * as Bech32 from './crypto/bech32.js';
 import * as Schnorr from './crypto/schnorr.js';
 import * as NIP04 from './crypto/nip04.js';
+import * as NIP44 from './crypto/nip44.js';
 
 /**
  * NostrKeyManager provides a high-level interface for cryptographic operations.
@@ -248,6 +249,68 @@ export class NostrKeyManager {
   deriveSharedSecret(theirPublicKey: Uint8Array): Uint8Array {
     this.ensureNotCleared();
     return NIP04.deriveSharedSecret(this.privateKey, theirPublicKey);
+  }
+
+  // ============================================================================
+  // NIP-44 Encryption (XChaCha20-Poly1305)
+  // ============================================================================
+
+  /**
+   * Encrypt a message using NIP-44 encryption.
+   * Uses XChaCha20-Poly1305 with HKDF key derivation.
+   * @param message Message to encrypt
+   * @param recipientPublicKey 32-byte x-only public key of recipient
+   * @returns Base64-encoded encrypted content
+   */
+  encryptNip44(message: string, recipientPublicKey: Uint8Array): string {
+    this.ensureNotCleared();
+    return NIP44.encrypt(message, this.privateKey, recipientPublicKey);
+  }
+
+  /**
+   * Encrypt a message using NIP-44 with hex-encoded recipient public key.
+   * @param message Message to encrypt
+   * @param recipientPublicKeyHex Hex-encoded recipient public key
+   * @returns Base64-encoded encrypted content
+   */
+  encryptNip44Hex(message: string, recipientPublicKeyHex: string): string {
+    this.ensureNotCleared();
+    const recipientPublicKey = hexToBytes(recipientPublicKeyHex);
+    return NIP44.encrypt(message, this.privateKey, recipientPublicKey);
+  }
+
+  /**
+   * Decrypt a NIP-44 encrypted message.
+   * @param encryptedContent Base64-encoded encrypted content
+   * @param senderPublicKey 32-byte x-only public key of sender
+   * @returns Decrypted message
+   */
+  decryptNip44(encryptedContent: string, senderPublicKey: Uint8Array): string {
+    this.ensureNotCleared();
+    return NIP44.decrypt(encryptedContent, this.privateKey, senderPublicKey);
+  }
+
+  /**
+   * Decrypt a NIP-44 message using hex-encoded sender public key.
+   * @param encryptedContent Base64-encoded encrypted content
+   * @param senderPublicKeyHex Hex-encoded sender public key
+   * @returns Decrypted message
+   */
+  decryptNip44Hex(encryptedContent: string, senderPublicKeyHex: string): string {
+    this.ensureNotCleared();
+    const senderPublicKey = hexToBytes(senderPublicKeyHex);
+    return NIP44.decrypt(encryptedContent, this.privateKey, senderPublicKey);
+  }
+
+  /**
+   * Derive NIP-44 conversation key with another party.
+   * Uses ECDH + HKDF with sorted public keys as salt.
+   * @param theirPublicKey 32-byte x-only public key
+   * @returns 32-byte conversation key
+   */
+  deriveConversationKey(theirPublicKey: Uint8Array): Uint8Array {
+    this.ensureNotCleared();
+    return NIP44.deriveConversationKey(this.privateKey, theirPublicKey);
   }
 
   /**
