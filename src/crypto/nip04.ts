@@ -8,6 +8,18 @@ import { secp256k1 } from '@noble/curves/secp256k1';
 import { sha256 } from '@noble/hashes/sha256';
 import { bytesToHex, hexToBytes, randomBytes } from '@noble/hashes/utils';
 
+/**
+ * Get the Web Crypto API (works in both Node.js and browser)
+ */
+async function getWebCrypto(): Promise<Crypto> {
+  if (typeof globalThis.crypto?.subtle !== 'undefined') {
+    return globalThis.crypto;
+  }
+  // Node.js environment - import webcrypto
+  const nodeCrypto = await import('crypto');
+  return nodeCrypto.webcrypto as unknown as Crypto;
+}
+
 /** Compression threshold in bytes */
 const COMPRESSION_THRESHOLD = 1024;
 
@@ -131,7 +143,7 @@ async function decompress(data: Uint8Array): Promise<Uint8Array> {
  * Import an AES-256-CBC key for encryption/decryption
  */
 async function importKey(keyBytes: Uint8Array): Promise<CryptoKey> {
-  const crypto = globalThis.crypto;
+  const crypto = await getWebCrypto();
   return crypto.subtle.importKey('raw', toBufferSource(keyBytes), { name: 'AES-CBC' }, false, [
     'encrypt',
     'decrypt',
@@ -146,7 +158,7 @@ async function aesEncrypt(
   key: Uint8Array,
   iv: Uint8Array
 ): Promise<Uint8Array> {
-  const crypto = globalThis.crypto;
+  const crypto = await getWebCrypto();
   const cryptoKey = await importKey(key);
   const ciphertext = await crypto.subtle.encrypt(
     { name: 'AES-CBC', iv: toBufferSource(iv) },
@@ -164,7 +176,7 @@ async function aesDecrypt(
   key: Uint8Array,
   iv: Uint8Array
 ): Promise<Uint8Array> {
-  const crypto = globalThis.crypto;
+  const crypto = await getWebCrypto();
   const cryptoKey = await importKey(key);
   const plaintext = await crypto.subtle.decrypt(
     { name: 'AES-CBC', iv: toBufferSource(iv) },
