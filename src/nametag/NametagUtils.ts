@@ -42,7 +42,7 @@ function isLikelyPhoneNumber(str: string): boolean {
   }
 
   // Count non-digit characters (excluding common phone number chars)
-  const cleanedLength = str.replace(/[\s\-\(\)\.]/g, '').length;
+  const cleanedLength = str.replace(/[\s\-().]/g, '').length;
   const digitRatio = digitCount / cleanedLength;
 
   return digitRatio > 0.5;

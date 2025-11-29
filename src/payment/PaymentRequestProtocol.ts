@@ -53,8 +53,10 @@ export interface ParsedPaymentRequest {
  */
 function generateRequestId(): string {
   const bytes = new Uint8Array(4);
-  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
-    crypto.getRandomValues(bytes);
+  // eslint-disable-next-line no-undef
+  if (typeof crypto !== 'undefined' && (crypto as Crypto).getRandomValues) {
+    // eslint-disable-next-line no-undef
+    (crypto as Crypto).getRandomValues(bytes);
   } else {
     // Fallback for environments without crypto.getRandomValues
     for (let i = 0; i < bytes.length; i++) {
