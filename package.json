@@ -1,6 +1,6 @@
 {
   "name": "@unicitylabs/nostr-js-sdk",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Unicity Nostr SDK - Token transfers and nametag bindings over Nostr protocol",
   "license": "MIT",
   "author": "Unicity Labs",
