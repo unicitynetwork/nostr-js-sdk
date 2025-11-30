@@ -11,6 +11,18 @@ import * as EventKinds from '../protocol/EventKinds.js';
 const MESSAGE_PREFIX = 'token_transfer:';
 
 /**
+ * Options for creating a token transfer event.
+ */
+export interface TokenTransferOptions {
+  /** Optional amount for metadata */
+  amount?: number | bigint;
+  /** Optional token symbol for metadata */
+  symbol?: string;
+  /** Optional event ID this transfer is responding to (e.g., payment request) */
+  replyToEventId?: string;
+}
+
+/**
  * Create a token transfer event.
  *
  * Event structure:
@@ -20,22 +32,39 @@ const MESSAGE_PREFIX = 'token_transfer:';
  *   - ["type", "token_transfer"] - Event type
  *   - ["amount", "<amount>"] - Optional amount
  *   - ["symbol", "<symbol>"] - Optional token symbol
+ *   - ["e", "<event_id>", "", "reply"] - Optional reply-to event (for payment request correlation)
  * - Content: NIP-04 encrypted "token_transfer:{tokenJson}"
  *
  * @param keyManager Key manager with signing keys
  * @param recipientPubkeyHex Recipient's public key (hex)
  * @param tokenJson Token JSON string
- * @param amount Optional amount for metadata
- * @param symbol Optional token symbol for metadata
+ * @param amountOrOptions Optional amount for metadata, or options object
+ * @param symbol Optional token symbol for metadata (ignored if options object used)
  * @returns Signed event
  */
 export async function createTokenTransferEvent(
   keyManager: NostrKeyManager,
   recipientPubkeyHex: string,
   tokenJson: string,
-  amount?: number | bigint,
+  amountOrOptions?: number | bigint | TokenTransferOptions,
   symbol?: string
 ): Promise<Event> {
+  // Parse options (support both old and new signatures)
+  let amount: number | bigint | undefined;
+  let tokenSymbol: string | undefined;
+  let replyToEventId: string | undefined;
+
+  if (amountOrOptions !== undefined && typeof amountOrOptions === 'object') {
+    // New options object signature
+    amount = amountOrOptions.amount;
+    tokenSymbol = amountOrOptions.symbol;
+    replyToEventId = amountOrOptions.replyToEventId;
+  } else {
+    // Old positional arguments signature
+    amount = amountOrOptions;
+    tokenSymbol = symbol;
+  }
+
   // Encrypt the token data
   const message = MESSAGE_PREFIX + tokenJson;
   const encryptedContent = await keyManager.encryptHex(message, recipientPubkeyHex);
@@ -50,8 +79,13 @@ export async function createTokenTransferEvent(
     tags.push(['amount', String(amount)]);
   }
 
-  if (symbol !== undefined) {
-    tags.push(['symbol', symbol]);
+  if (tokenSymbol !== undefined) {
+    tags.push(['symbol', tokenSymbol]);
+  }
+
+  // Add optional reply-to event reference (for payment request correlation)
+  if (replyToEventId !== undefined && replyToEventId.length > 0) {
+    tags.push(['e', replyToEventId, '', 'reply']);
   }
 
   const event = Event.create(keyManager, {
@@ -147,6 +181,16 @@ export function getAmount(event: Event): bigint | undefined {
  */
 export function getSymbol(event: Event): string | undefined {
   return event.getTagValue('symbol');
+}
+
+/**
+ * Get the reply-to event ID from a token transfer event.
+ * Used to correlate token transfers with payment requests.
+ * @param event Token transfer event
+ * @returns Referenced event ID, or undefined if not present
+ */
+export function getReplyToEventId(event: Event): string | undefined {
+  return event.getTagValue('e');
 }
 
 /**

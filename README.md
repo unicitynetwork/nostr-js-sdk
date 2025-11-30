@@ -190,8 +190,28 @@ const event = await TokenTransferProtocol.createTokenTransferEvent(
 
 await client.publishEvent(event);
 
+// Create token transfer in response to a payment request
+const paymentRequestEventId = '...'; // Event ID of the original payment request
+const event = await TokenTransferProtocol.createTokenTransferEvent(
+  keyManager,
+  recipientPubkey,
+  tokenJson,
+  {
+    amount: 100n,
+    symbol: 'UNIT',
+    replyToEventId: paymentRequestEventId  // Links transfer to the payment request
+  }
+);
+
 // Parse received token transfer
 const tokenJson = await TokenTransferProtocol.parseTokenTransfer(event, keyManager);
+
+// Get reply-to event ID (for payment request correlation)
+const replyToId = TokenTransferProtocol.getReplyToEventId(event);
+if (replyToId) {
+  // This transfer is in response to a payment request
+  const originalRequest = pendingRequests.get(replyToId);
+}
 ```
 
 ### Payment Requests
@@ -286,6 +306,7 @@ Token transfers use Nostr event kind 31113 with NIP-04 encryption.
 | `type` | Yes | Always `"token_transfer"` |
 | `amount` | No | Transfer amount (metadata for filtering) |
 | `symbol` | No | Token symbol (metadata for filtering) |
+| `e` | No | Reply-to event ID (for payment request correlation) |
 
 ### Encrypted Content
 
@@ -310,10 +331,11 @@ gz:<base64_ciphertext>?iv=<base64_iv>
 TokenTransferProtocol.isTokenTransfer(event); // boolean
 
 // Get metadata from tags
-TokenTransferProtocol.getAmount(event);    // bigint | undefined
-TokenTransferProtocol.getSymbol(event);    // string | undefined
-TokenTransferProtocol.getRecipient(event); // string | undefined
-TokenTransferProtocol.getSender(event);    // string
+TokenTransferProtocol.getAmount(event);         // bigint | undefined
+TokenTransferProtocol.getSymbol(event);         // string | undefined
+TokenTransferProtocol.getRecipient(event);      // string | undefined
+TokenTransferProtocol.getSender(event);         // string
+TokenTransferProtocol.getReplyToEventId(event); // string | undefined (payment request correlation)
 ```
 
 ## Payment Request Format
@@ -477,13 +499,13 @@ To test payment requests against a real wallet:
 
 ```bash
 # Send a single payment request
-TARGET_NAMETAG=mp-6 npm test -- --testNamePattern="send single payment request"
+TARGET_NAMETAG=mp-9 npm test -- --testNamePattern="send single payment request"
 
 # Send multiple payment requests (for UI testing)
-TARGET_NAMETAG=mp-6 npm test -- --testNamePattern="send multiple payment requests"
+TARGET_NAMETAG=mp-9 npm test -- --testNamePattern="send multiple payment requests"
 
 # Full flow with token transfer verification (requires wallet interaction)
-TARGET_NAMETAG=mp-6 npm test -- --testNamePattern="full payment request flow"
+TARGET_NAMETAG=mp-9 npm test -- --testNamePattern="full payment request flow"
 ```
 
 Environment variables:

@@ -6,13 +6,13 @@
  *
  * Usage:
  *   # Send a single payment request
- *   TARGET_NAMETAG=mp-6 npm run test:integration -- --testNamePattern="send single payment request"
+ *   TARGET_NAMETAG=mp-9 npm run test:integration -- --testNamePattern="send single payment request"
  *
  *   # Send multiple payment requests
- *   TARGET_NAMETAG=mp-6 npm run test:integration -- --testNamePattern="send multiple payment requests"
+ *   TARGET_NAMETAG=mp-9 npm run test:integration -- --testNamePattern="send multiple payment requests"
  *
  *   # Full flow with token transfer verification (requires wallet interaction)
- *   TARGET_NAMETAG=mp-6 npm run test:integration -- --testNamePattern="full payment request flow"
+ *   TARGET_NAMETAG=mp-9 npm run test:integration -- --testNamePattern="full payment request flow"
  *
  * Environment variables:
  *   TARGET_NAMETAG - Nametag of the wallet to send requests to (required)
@@ -30,6 +30,8 @@ import {
   Filter,
   PaymentRequestProtocol,
   NametagBinding,
+  TokenTransferProtocol,
+  Event,
 } from '../../src/index.js';
 
 // Skip if no target nametag provided
@@ -217,6 +219,8 @@ describe.skipIf(SKIP_RELAY_TESTS)('Payment Request - Relay E2E', () => {
 
     let tokenReceived = false;
     let receivedTokenJson: string | null = null;
+    let receivedReplyToEventId: string | undefined = undefined;
+    let receivedEvent: Event | null = null;
 
     const TOKEN_PREFIX = 'token_transfer:';
 
@@ -247,6 +251,17 @@ describe.skipIf(SKIP_RELAY_TESTS)('Payment Request - Relay E2E', () => {
           if (decrypted.startsWith(TOKEN_PREFIX)) {
             console.log('TOKEN TRANSFER RECEIVED!');
             receivedTokenJson = decrypted;
+            receivedEvent = event;
+
+            // Extract reply-to event ID for payment request correlation
+            const replyToId = TokenTransferProtocol.getReplyToEventId(event);
+            if (replyToId) {
+              receivedReplyToEventId = replyToId;
+              console.log(`   Reply-to event ID (e tag): ${replyToId.substring(0, 16)}...`);
+            } else {
+              console.log('   No reply-to event ID (e tag) found');
+            }
+
             tokenReceived = true;
           }
         } catch (e) {
@@ -271,8 +286,9 @@ describe.skipIf(SKIP_RELAY_TESTS)('Payment Request - Relay E2E', () => {
       message,
       recipientNametag: testNametag,
     };
-    await client.sendPaymentRequest(targetPubkey, request);
+    const paymentRequestEventId = await client.sendPaymentRequest(targetPubkey, request);
     console.log('Payment request sent!');
+    console.log(`   Event ID: ${paymentRequestEventId.substring(0, 16)}...`);
     console.log(`   Amount: ${PaymentRequestProtocol.formatAmount(amount, decimals)}`);
     console.log(`   Recipient: ${testNametag}`);
 
@@ -318,6 +334,34 @@ describe.skipIf(SKIP_RELAY_TESTS)('Payment Request - Relay E2E', () => {
         console.log(`Payload: ${jsonPart.substring(0, Math.min(100, jsonPart.length))}...`);
       }
       console.log('='.repeat(64) + '\n');
+
+      // Step 7: Verify payment request correlation (e tag)
+      console.log('\n[Step 7] Verify payment request correlation (e tag)');
+      console.log('-'.repeat(40));
+
+      if (receivedReplyToEventId) {
+        console.log('Token transfer contains reply-to event ID:');
+        console.log(`   Expected (payment request): ${paymentRequestEventId}`);
+        console.log(`   Actual (e tag in transfer): ${receivedReplyToEventId}`);
+
+        if (paymentRequestEventId === receivedReplyToEventId) {
+          console.log('\n' + '='.repeat(64));
+          console.log('SUCCESS: CORRELATION VERIFIED!');
+          console.log('='.repeat(64));
+          console.log('The token transfer correctly references the payment request.');
+          console.log('Server can match this transfer to the original request using:');
+          console.log('   TokenTransferProtocol.getReplyToEventId(event)');
+          console.log('='.repeat(64) + '\n');
+        } else {
+          console.log('WARNING: Event IDs do not match!');
+          console.log('   This may indicate an issue with the wallet implementation.');
+        }
+      } else {
+        console.log('WARNING: No reply-to event ID (e tag) found in token transfer.');
+        console.log('   The wallet should include the payment request event ID');
+        console.log('   as an \'e\' tag when responding to payment requests.');
+        console.log(`   Expected: ["e", "${paymentRequestEventId.substring(0, 16)}...", "", "reply"]`);
+      }
     } else {
       console.log('TIMEOUT - No token transfer received');
       console.log('   Check wallet for errors or try again.');
