@@ -475,17 +475,24 @@ export class NostrClient {
    * Send a token transfer (encrypted).
    * @param recipientPubkeyHex Recipient's public key (hex)
    * @param tokenJson Token JSON string
+   * @param options Optional parameters (amount, symbol, replyToEventId)
    * @returns Promise that resolves with the event ID
    */
   async sendTokenTransfer(
     recipientPubkeyHex: string,
-    tokenJson: string
+    tokenJson: string,
+    options?: {
+      amount?: number | bigint;
+      symbol?: string;
+      replyToEventId?: string;
+    }
   ): Promise<string> {
     const TokenTransferProtocol = await import('../token/TokenTransferProtocol.js');
     const event = await TokenTransferProtocol.createTokenTransferEvent(
       this.keyManager,
       recipientPubkeyHex,
-      tokenJson
+      tokenJson,
+      options
     );
     return this.publishEvent(event);
   }

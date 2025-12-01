@@ -177,31 +177,24 @@ client.unsubscribe(subId);
 ### Token Transfers
 
 ```typescript
-import { TokenTransferProtocol } from '@unicitylabs/nostr-sdk';
+import { NostrClient, TokenTransferProtocol } from '@unicitylabs/nostr-sdk';
 
-// Create token transfer event
-const event = await TokenTransferProtocol.createTokenTransferEvent(
-  keyManager,
-  recipientPubkey,
-  JSON.stringify({ tokenId: '...', amount: 100 }),
-  100n,  // amount (optional metadata)
-  'UNIT' // symbol (optional metadata)
-);
+// Simple token transfer using NostrClient
+const eventId = await client.sendTokenTransfer(recipientPubkey, tokenJson);
 
-await client.publishEvent(event);
+// Token transfer with metadata
+const eventId = await client.sendTokenTransfer(recipientPubkey, tokenJson, {
+  amount: 100n,
+  symbol: 'UNIT'
+});
 
-// Create token transfer in response to a payment request
+// Token transfer in response to a payment request (with correlation)
 const paymentRequestEventId = '...'; // Event ID of the original payment request
-const event = await TokenTransferProtocol.createTokenTransferEvent(
-  keyManager,
-  recipientPubkey,
-  tokenJson,
-  {
-    amount: 100n,
-    symbol: 'UNIT',
-    replyToEventId: paymentRequestEventId  // Links transfer to the payment request
-  }
-);
+const eventId = await client.sendTokenTransfer(recipientPubkey, tokenJson, {
+  amount: 100n,
+  symbol: 'UNIT',
+  replyToEventId: paymentRequestEventId  // Links transfer to the payment request
+});
 
 // Parse received token transfer
 const tokenJson = await TokenTransferProtocol.parseTokenTransfer(event, keyManager);
