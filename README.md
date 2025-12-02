@@ -47,7 +47,14 @@ console.log(keyManager.getPublicKeyHex());
 import { NostrClient, NostrKeyManager } from '@unicitylabs/nostr-sdk';
 
 const keyManager = NostrKeyManager.generate();
+
+// Create client with default options
 const client = new NostrClient(keyManager);
+
+// Or configure with custom options
+const client = new NostrClient(keyManager, {
+  queryTimeoutMs: 15000,  // Increase timeout for slow relays (default: 5000ms)
+});
 
 // Connect to relays
 await client.connect(
@@ -58,6 +65,9 @@ await client.connect(
 // Check connection status
 console.log(client.isConnected());
 console.log(client.getConnectedRelays());
+
+// You can also adjust timeout dynamically
+client.setQueryTimeout(30000);  // 30 seconds
 ```
 
 ### Publishing Events

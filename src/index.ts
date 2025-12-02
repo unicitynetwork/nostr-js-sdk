@@ -67,6 +67,10 @@ export type {
 } from './client/NostrEventListener.js';
 
 export type {
+  NostrClientOptions,
+} from './client/NostrClient.js';
+
+export type {
   IWebSocket,
   WebSocketMessageEvent,
   WebSocketCloseEvent,

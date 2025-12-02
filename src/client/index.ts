@@ -3,6 +3,7 @@
  */
 
 export { NostrClient } from './NostrClient.js';
+export type { NostrClientOptions } from './NostrClient.js';
 export { CallbackEventListener } from './NostrEventListener.js';
 export type { NostrEventListener } from './NostrEventListener.js';
 export {

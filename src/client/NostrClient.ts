@@ -24,8 +24,16 @@ const CONNECTION_TIMEOUT_MS = 30000;
 /** Reconnection delay in milliseconds */
 const RECONNECT_DELAY_MS = 5000;
 
-/** Query timeout in milliseconds */
-const QUERY_TIMEOUT_MS = 5000;
+/** Default query timeout in milliseconds */
+const DEFAULT_QUERY_TIMEOUT_MS = 5000;
+
+/**
+ * Options for configuring NostrClient behavior.
+ */
+export interface NostrClientOptions {
+  /** Query timeout in milliseconds (default: 5000) */
+  queryTimeoutMs?: number;
+}
 
 /**
  * Subscription information structure
@@ -75,13 +83,16 @@ export class NostrClient {
   private pendingOks: Map<string, PendingOk> = new Map();
   private subscriptionCounter = 0;
   private closed = false;
+  private queryTimeoutMs: number;
 
   /**
    * Create a NostrClient instance.
    * @param keyManager Key manager with signing keys
+   * @param options Optional configuration options
    */
-  constructor(keyManager: NostrKeyManager) {
+  constructor(keyManager: NostrKeyManager, options?: NostrClientOptions) {
     this.keyManager = keyManager;
+    this.queryTimeoutMs = options?.queryTimeoutMs ?? DEFAULT_QUERY_TIMEOUT_MS;
   }
 
   /**
@@ -90,6 +101,22 @@ export class NostrClient {
    */
   getKeyManager(): NostrKeyManager {
     return this.keyManager;
+  }
+
+  /**
+   * Get the current query timeout in milliseconds.
+   * @returns Query timeout in milliseconds
+   */
+  getQueryTimeout(): number {
+    return this.queryTimeoutMs;
+  }
+
+  /**
+   * Set the query timeout for nametag lookups and other queries.
+   * @param timeoutMs Timeout in milliseconds
+   */
+  setQueryTimeout(timeoutMs: number): void {
+    this.queryTimeoutMs = timeoutMs;
   }
 
   /**
@@ -629,7 +656,7 @@ export class NostrClient {
       const timeoutId = setTimeout(() => {
         this.unsubscribe(subscriptionId);
         resolve(null);
-      }, QUERY_TIMEOUT_MS);
+      }, this.queryTimeoutMs);
 
       let result: string | null = null;
       let latestCreatedAt = 0;
