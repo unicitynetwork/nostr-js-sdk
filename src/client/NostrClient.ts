@@ -395,14 +395,16 @@ export class NostrClient {
       }
 
       // Send a subscription request as a ping (relays respond with EOSE)
-      // Using a unique subscription ID that we immediately close
+      // Use a single fixed subscription ID per relay to avoid accumulating subscriptions
+      // Note: limit:1 is used because some relays don't respond to limit:0
       try {
-        const pingSubId = `ping-${Date.now()}`;
-        const pingMessage = JSON.stringify(['REQ', pingSubId, { limit: 0 }]);
-        relay.socket.send(pingMessage);
-        // Immediately close the subscription
+        const pingSubId = `ping`;
+        // First close any existing ping subscription to ensure we don't accumulate
         const closeMessage = JSON.stringify(['CLOSE', pingSubId]);
         relay.socket.send(closeMessage);
+        // Then send the new ping request (limit:1 ensures relay sends EOSE)
+        const pingMessage = JSON.stringify(['REQ', pingSubId, { limit: 1 }]);
+        relay.socket.send(pingMessage);
       } catch {
         // Send failed, connection likely dead
         console.warn(`Ping to ${url} failed, reconnecting...`);
