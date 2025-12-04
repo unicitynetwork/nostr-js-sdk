@@ -21,11 +21,11 @@ import type { PrivateMessage, PrivateMessageOptions } from '../messaging/types.j
 /** Connection timeout in milliseconds */
 const CONNECTION_TIMEOUT_MS = 30000;
 
-/** Reconnection delay in milliseconds */
-const RECONNECT_DELAY_MS = 5000;
-
-/** Default query timeout in milliseconds */
+/** Default options */
 const DEFAULT_QUERY_TIMEOUT_MS = 5000;
+const DEFAULT_RECONNECT_INTERVAL_MS = 1000;
+const DEFAULT_MAX_RECONNECT_INTERVAL_MS = 30000;
+const DEFAULT_PING_INTERVAL_MS = 30000;
 
 /**
  * Options for configuring NostrClient behavior.
@@ -33,6 +33,28 @@ const DEFAULT_QUERY_TIMEOUT_MS = 5000;
 export interface NostrClientOptions {
   /** Query timeout in milliseconds (default: 5000) */
   queryTimeoutMs?: number;
+  /** Enable automatic reconnection on connection loss (default: true) */
+  autoReconnect?: boolean;
+  /** Initial reconnection interval in milliseconds (default: 1000) */
+  reconnectIntervalMs?: number;
+  /** Maximum reconnection interval with exponential backoff (default: 30000) */
+  maxReconnectIntervalMs?: number;
+  /** Ping interval for health checks in milliseconds (default: 30000, 0 to disable) */
+  pingIntervalMs?: number;
+}
+
+/**
+ * Connection event listener for monitoring relay connections.
+ */
+export interface ConnectionEventListener {
+  /** Called when a relay connection is established */
+  onConnect?(relayUrl: string): void;
+  /** Called when a relay connection is lost */
+  onDisconnect?(relayUrl: string, reason: string): void;
+  /** Called when reconnection is being attempted */
+  onReconnecting?(relayUrl: string, attempt: number): void;
+  /** Called when reconnection succeeds */
+  onReconnected?(relayUrl: string): void;
 }
 
 /**
@@ -61,6 +83,11 @@ interface RelayConnection {
   socket: IWebSocket | null;
   connected: boolean;
   reconnecting: boolean;
+  reconnectAttempts: number;
+  reconnectTimer: ReturnType<typeof setTimeout> | null;
+  pingTimer: ReturnType<typeof setInterval> | null;
+  lastPongTime: number;
+  wasConnected: boolean;  // Track if this relay was previously connected (for reconnect vs initial connect)
 }
 
 /**
@@ -83,7 +110,16 @@ export class NostrClient {
   private pendingOks: Map<string, PendingOk> = new Map();
   private subscriptionCounter = 0;
   private closed = false;
+
+  // Configuration options
   private queryTimeoutMs: number;
+  private autoReconnect: boolean;
+  private reconnectIntervalMs: number;
+  private maxReconnectIntervalMs: number;
+  private pingIntervalMs: number;
+
+  // Connection event listeners
+  private connectionListeners: ConnectionEventListener[] = [];
 
   /**
    * Create a NostrClient instance.
@@ -93,6 +129,59 @@ export class NostrClient {
   constructor(keyManager: NostrKeyManager, options?: NostrClientOptions) {
     this.keyManager = keyManager;
     this.queryTimeoutMs = options?.queryTimeoutMs ?? DEFAULT_QUERY_TIMEOUT_MS;
+    this.autoReconnect = options?.autoReconnect ?? true;
+    this.reconnectIntervalMs = options?.reconnectIntervalMs ?? DEFAULT_RECONNECT_INTERVAL_MS;
+    this.maxReconnectIntervalMs = options?.maxReconnectIntervalMs ?? DEFAULT_MAX_RECONNECT_INTERVAL_MS;
+    this.pingIntervalMs = options?.pingIntervalMs ?? DEFAULT_PING_INTERVAL_MS;
+  }
+
+  /**
+   * Add a connection event listener.
+   * @param listener Listener for connection events
+   */
+  addConnectionListener(listener: ConnectionEventListener): void {
+    this.connectionListeners.push(listener);
+  }
+
+  /**
+   * Remove a connection event listener.
+   * @param listener Listener to remove
+   */
+  removeConnectionListener(listener: ConnectionEventListener): void {
+    const index = this.connectionListeners.indexOf(listener);
+    if (index !== -1) {
+      this.connectionListeners.splice(index, 1);
+    }
+  }
+
+  /**
+   * Emit a connection event to all listeners.
+   */
+  private emitConnectionEvent(
+    eventType: 'connect' | 'disconnect' | 'reconnecting' | 'reconnected',
+    relayUrl: string,
+    extra?: string | number
+  ): void {
+    for (const listener of this.connectionListeners) {
+      try {
+        switch (eventType) {
+          case 'connect':
+            listener.onConnect?.(relayUrl);
+            break;
+          case 'disconnect':
+            listener.onDisconnect?.(relayUrl, extra as string);
+            break;
+          case 'reconnecting':
+            listener.onReconnecting?.(relayUrl, extra as number);
+            break;
+          case 'reconnected':
+            listener.onReconnected?.(relayUrl);
+            break;
+        }
+      } catch {
+        // Ignore listener errors
+      }
+    }
   }
 
   /**
@@ -135,13 +224,12 @@ export class NostrClient {
 
   /**
    * Connect to a single relay.
+   * @param isReconnect Whether this is a reconnection attempt
    */
-  private async connectToRelay(url: string): Promise<void> {
-    if (this.relays.has(url)) {
-      const relay = this.relays.get(url)!;
-      if (relay.connected) {
-        return;
-      }
+  private async connectToRelay(url: string, isReconnect = false): Promise<void> {
+    const existingRelay = this.relays.get(url);
+    if (existingRelay?.connected) {
+      return;
     }
 
     return new Promise((resolve, reject) => {
@@ -156,12 +244,30 @@ export class NostrClient {
             socket,
             connected: false,
             reconnecting: false,
+            reconnectAttempts: 0,
+            reconnectTimer: null,
+            pingTimer: null,
+            lastPongTime: Date.now(),
+            wasConnected: existingRelay?.wasConnected ?? false,
           };
 
           socket.onopen = () => {
             clearTimeout(timeoutId);
             relay.connected = true;
+            relay.reconnectAttempts = 0;  // Reset on successful connection
+            relay.lastPongTime = Date.now();
             this.relays.set(url, relay);
+
+            // Emit appropriate connection event
+            if (isReconnect && relay.wasConnected) {
+              this.emitConnectionEvent('reconnected', url);
+            } else {
+              this.emitConnectionEvent('connect', url);
+            }
+            relay.wasConnected = true;
+
+            // Start ping health check
+            this.startPingTimer(url);
 
             // Re-establish subscriptions
             this.resubscribeAll(url);
@@ -175,15 +281,28 @@ export class NostrClient {
           socket.onmessage = (event) => {
             try {
               const data = extractMessageData(event);
+              // Update last pong time on any message (relay is alive)
+              const r = this.relays.get(url);
+              if (r) {
+                r.lastPongTime = Date.now();
+              }
               this.handleRelayMessage(url, data);
             } catch (error) {
               console.error(`Error handling message from ${url}:`, error);
             }
           };
 
-          socket.onclose = () => {
+          socket.onclose = (event) => {
+            const wasConnected = relay.connected;
             relay.connected = false;
-            if (!this.closed && !relay.reconnecting) {
+            this.stopPingTimer(url);
+
+            if (wasConnected) {
+              const reason = event?.reason || 'Connection closed';
+              this.emitConnectionEvent('disconnect', url, reason);
+            }
+
+            if (!this.closed && this.autoReconnect && !relay.reconnecting) {
               this.scheduleReconnect(url);
             }
           };
@@ -205,24 +324,107 @@ export class NostrClient {
   }
 
   /**
-   * Schedule a reconnection attempt for a relay.
+   * Schedule a reconnection attempt for a relay with exponential backoff.
    */
   private scheduleReconnect(url: string): void {
     const relay = this.relays.get(url);
-    if (!relay || this.closed) return;
+    if (!relay || this.closed || !this.autoReconnect) return;
+
+    // Clear any existing reconnect timer
+    if (relay.reconnectTimer) {
+      clearTimeout(relay.reconnectTimer);
+    }
 
     relay.reconnecting = true;
+    relay.reconnectAttempts++;
 
-    setTimeout(async () => {
+    // Calculate delay with exponential backoff
+    const baseDelay = this.reconnectIntervalMs;
+    const exponentialDelay = baseDelay * Math.pow(2, relay.reconnectAttempts - 1);
+    const delay = Math.min(exponentialDelay, this.maxReconnectIntervalMs);
+
+    this.emitConnectionEvent('reconnecting', url, relay.reconnectAttempts);
+
+    relay.reconnectTimer = setTimeout(async () => {
       if (this.closed) return;
+
+      relay.reconnectTimer = null;
 
       try {
         relay.reconnecting = false;
-        await this.connectToRelay(url);
+        await this.connectToRelay(url, true);
       } catch {
-        // Will trigger another reconnect via onclose
+        // Connection failed, schedule another attempt
+        if (!this.closed && this.autoReconnect) {
+          this.scheduleReconnect(url);
+        }
       }
-    }, RECONNECT_DELAY_MS);
+    }, delay);
+  }
+
+  /**
+   * Start the ping timer for a relay to detect stale connections.
+   */
+  private startPingTimer(url: string): void {
+    if (this.pingIntervalMs <= 0) return;
+
+    const relay = this.relays.get(url);
+    if (!relay) return;
+
+    // Stop existing timer if any
+    this.stopPingTimer(url);
+
+    relay.pingTimer = setInterval(() => {
+      if (!relay.connected || !relay.socket) {
+        this.stopPingTimer(url);
+        return;
+      }
+
+      // Check if we've received any message recently
+      const timeSinceLastPong = Date.now() - relay.lastPongTime;
+      if (timeSinceLastPong > this.pingIntervalMs * 2) {
+        // Connection is stale - force close and reconnect
+        console.warn(`Relay ${url} appears stale (no response for ${timeSinceLastPong}ms), reconnecting...`);
+        this.stopPingTimer(url);
+        try {
+          relay.socket.close();
+        } catch {
+          // Ignore close errors
+        }
+        return;
+      }
+
+      // Send a subscription request as a ping (relays respond with EOSE)
+      // Using a unique subscription ID that we immediately close
+      try {
+        const pingSubId = `ping-${Date.now()}`;
+        const pingMessage = JSON.stringify(['REQ', pingSubId, { limit: 0 }]);
+        relay.socket.send(pingMessage);
+        // Immediately close the subscription
+        const closeMessage = JSON.stringify(['CLOSE', pingSubId]);
+        relay.socket.send(closeMessage);
+      } catch {
+        // Send failed, connection likely dead
+        console.warn(`Ping to ${url} failed, reconnecting...`);
+        this.stopPingTimer(url);
+        try {
+          relay.socket.close();
+        } catch {
+          // Ignore close errors
+        }
+      }
+    }, this.pingIntervalMs);
+  }
+
+  /**
+   * Stop the ping timer for a relay.
+   */
+  private stopPingTimer(url: string): void {
+    const relay = this.relays.get(url);
+    if (relay?.pingTimer) {
+      clearInterval(relay.pingTimer);
+      relay.pingTimer = null;
+    }
   }
 
   /**
@@ -384,11 +586,23 @@ export class NostrClient {
     }
     this.eventQueue = [];
 
-    // Close all relay connections
-    for (const [, relay] of this.relays) {
+    // Close all relay connections and clean up timers
+    for (const [url, relay] of this.relays) {
+      // Stop ping timer
+      if (relay.pingTimer) {
+        clearInterval(relay.pingTimer);
+        relay.pingTimer = null;
+      }
+      // Stop reconnect timer
+      if (relay.reconnectTimer) {
+        clearTimeout(relay.reconnectTimer);
+        relay.reconnectTimer = null;
+      }
+      // Close socket
       if (relay.socket && relay.socket.readyState !== CLOSED) {
         relay.socket.close(1000, 'Client disconnected');
       }
+      this.emitConnectionEvent('disconnect', url, 'Client disconnected');
     }
     this.relays.clear();
     this.subscriptions.clear();

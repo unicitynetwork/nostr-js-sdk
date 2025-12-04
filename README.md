@@ -44,16 +44,28 @@ console.log(keyManager.getPublicKeyHex());
 ### Connecting to Relays
 
 ```typescript
-import { NostrClient, NostrKeyManager } from '@unicitylabs/nostr-sdk';
+import { NostrClient, NostrKeyManager, ConnectionEventListener } from '@unicitylabs/nostr-sdk';
 
 const keyManager = NostrKeyManager.generate();
 
-// Create client with default options
+// Create client with default options (auto-reconnect enabled)
 const client = new NostrClient(keyManager);
 
 // Or configure with custom options
 const client = new NostrClient(keyManager, {
-  queryTimeoutMs: 15000,  // Increase timeout for slow relays (default: 5000ms)
+  queryTimeoutMs: 15000,        // Query timeout (default: 5000ms)
+  autoReconnect: true,          // Auto-reconnect on connection loss (default: true)
+  reconnectIntervalMs: 1000,    // Initial reconnect delay (default: 1000ms)
+  maxReconnectIntervalMs: 30000, // Max backoff interval (default: 30000ms)
+  pingIntervalMs: 30000,        // Health check interval (default: 30000ms, 0 to disable)
+});
+
+// Monitor connection events
+client.addConnectionListener({
+  onConnect: (url) => console.log(`Connected to ${url}`),
+  onDisconnect: (url, reason) => console.log(`Disconnected from ${url}: ${reason}`),
+  onReconnecting: (url, attempt) => console.log(`Reconnecting to ${url} (attempt ${attempt})...`),
+  onReconnected: (url) => console.log(`Reconnected to ${url}`),
 });
 
 // Connect to relays
@@ -66,7 +78,7 @@ await client.connect(
 console.log(client.isConnected());
 console.log(client.getConnectedRelays());
 
-// You can also adjust timeout dynamically
+// Adjust timeout dynamically
 client.setQueryTimeout(30000);  // 30 seconds
 ```
 

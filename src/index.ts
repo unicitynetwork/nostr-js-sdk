@@ -68,6 +68,7 @@ export type {
 
 export type {
   NostrClientOptions,
+  ConnectionEventListener,
 } from './client/NostrClient.js';
 
 export type {
