@@ -65,6 +65,9 @@ export const FILE_METADATA = 31114;
 /** Unicity: Payment request */
 export const PAYMENT_REQUEST = 31115;
 
+/** Unicity: Payment request response (accept/decline) */
+export const PAYMENT_REQUEST_RESPONSE = 31116;
+
 // ============================================================================
 // Event Kind Classification Functions
 // ============================================================================
@@ -144,6 +147,8 @@ export function getName(kind: number): string {
       return 'File Metadata';
     case PAYMENT_REQUEST:
       return 'Payment Request';
+    case PAYMENT_REQUEST_RESPONSE:
+      return 'Payment Request Response';
     default:
       if (isReplaceable(kind)) {
         return `Replaceable (${kind})`;

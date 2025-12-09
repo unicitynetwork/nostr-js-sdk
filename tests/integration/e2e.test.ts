@@ -407,6 +407,245 @@ describe('E2E: Payment Request', () => {
   });
 });
 
+describe('E2E: Payment Request Decline and Expiration', () => {
+  let requester: NostrKeyManager;
+  let target: NostrKeyManager;
+  const SOLANA_COIN_ID = 'dee5f8ce778562eec90e9c38a91296a023210ccc76ff4c29d527ac3eb64ade93';
+
+  beforeEach(() => {
+    requester = NostrKeyManager.generate();
+    target = NostrKeyManager.generate();
+  });
+
+  it('should create and parse payment request decline response', async () => {
+    // Step 1: Create a payment request
+    const request = {
+      amount: BigInt(1_000_000_000),
+      coinId: SOLANA_COIN_ID,
+      message: 'Payment for services',
+      recipientNametag: 'merchant',
+    };
+
+    const requestEvent = await PaymentRequestProtocol.createPaymentRequestEvent(
+      requester,
+      target.getPublicKeyHex(),
+      request
+    );
+
+    // Step 2: Parse the request as target
+    const parsedRequest = await PaymentRequestProtocol.parsePaymentRequest(requestEvent, target);
+    expect(parsedRequest.requestId).toBeDefined();
+    expect(parsedRequest.eventId).toBe(requestEvent.id);
+
+    // Step 3: Target declines the request
+    const declineResponse: PaymentRequestProtocol.PaymentRequestResponse = {
+      requestId: parsedRequest.requestId,
+      originalEventId: parsedRequest.eventId,
+      status: PaymentRequestProtocol.ResponseStatus.DECLINED,
+      reason: 'Insufficient funds',
+    };
+
+    const responseEvent = await PaymentRequestProtocol.createPaymentRequestResponseEvent(
+      target,
+      requester.getPublicKeyHex(),
+      declineResponse
+    );
+
+    // Step 4: Verify response event structure
+    expect(responseEvent.kind).toBe(EventKinds.PAYMENT_REQUEST_RESPONSE);
+    expect(responseEvent.verify()).toBe(true);
+    expect(PaymentRequestProtocol.isPaymentRequestResponse(responseEvent)).toBe(true);
+    expect(PaymentRequestProtocol.getResponseStatus(responseEvent)).toBe('DECLINED');
+    expect(PaymentRequestProtocol.getOriginalEventId(responseEvent)).toBe(requestEvent.id);
+
+    // Step 5: Requester parses the decline response
+    const parsedResponse = await PaymentRequestProtocol.parsePaymentRequestResponse(responseEvent, requester);
+    expect(parsedResponse.requestId).toBe(parsedRequest.requestId);
+    expect(parsedResponse.originalEventId).toBe(requestEvent.id);
+    expect(parsedResponse.status).toBe(PaymentRequestProtocol.ResponseStatus.DECLINED);
+    expect(parsedResponse.reason).toBe('Insufficient funds');
+    expect(parsedResponse.senderPubkey).toBe(target.getPublicKeyHex());
+  });
+
+  it('should create and parse expired response', async () => {
+    // Create a payment request that we'll mark as expired
+    const request = {
+      amount: BigInt(500_000_000),
+      coinId: SOLANA_COIN_ID,
+      recipientNametag: 'merchant',
+      deadline: Date.now() - 1000, // Already expired
+    };
+
+    const requestEvent = await PaymentRequestProtocol.createPaymentRequestEvent(
+      requester,
+      target.getPublicKeyHex(),
+      request
+    );
+
+    const parsedRequest = await PaymentRequestProtocol.parsePaymentRequest(requestEvent, target);
+
+    // The request should be expired
+    expect(PaymentRequestProtocol.isExpired(parsedRequest)).toBe(true);
+    expect(PaymentRequestProtocol.getRemainingTimeMs(parsedRequest)).toBe(0);
+
+    // Target sends expired response
+    const expiredResponse: PaymentRequestProtocol.PaymentRequestResponse = {
+      requestId: parsedRequest.requestId,
+      originalEventId: parsedRequest.eventId,
+      status: PaymentRequestProtocol.ResponseStatus.EXPIRED,
+    };
+
+    const responseEvent = await PaymentRequestProtocol.createPaymentRequestResponseEvent(
+      target,
+      requester.getPublicKeyHex(),
+      expiredResponse
+    );
+
+    expect(PaymentRequestProtocol.getResponseStatus(responseEvent)).toBe('EXPIRED');
+
+    // Requester parses the expired response
+    const parsedResponse = await PaymentRequestProtocol.parsePaymentRequestResponse(responseEvent, requester);
+    expect(parsedResponse.status).toBe(PaymentRequestProtocol.ResponseStatus.EXPIRED);
+    expect(parsedResponse.reason).toBeUndefined();
+  });
+
+  it('should handle payment request with custom deadline', async () => {
+    const deadline = Date.now() + 120000; // 2 minutes from now
+
+    const request = {
+      amount: BigInt(2_000_000_000),
+      coinId: SOLANA_COIN_ID,
+      message: 'Time-limited offer',
+      recipientNametag: 'limited-time-shop',
+      deadline,
+    };
+
+    const event = await PaymentRequestProtocol.createPaymentRequestEvent(
+      requester,
+      target.getPublicKeyHex(),
+      request
+    );
+
+    const parsed = await PaymentRequestProtocol.parsePaymentRequest(event, target);
+
+    expect(parsed.deadline).toBe(deadline);
+    expect(PaymentRequestProtocol.isExpired(parsed)).toBe(false);
+
+    const remaining = PaymentRequestProtocol.getRemainingTimeMs(parsed);
+    expect(remaining).not.toBeNull();
+    expect(remaining).toBeGreaterThan(100000); // At least 100 seconds remaining
+    expect(remaining).toBeLessThanOrEqual(120000);
+  });
+
+  it('should handle payment request with no deadline (null)', async () => {
+    const request = {
+      amount: BigInt(1_000_000_000),
+      coinId: SOLANA_COIN_ID,
+      recipientNametag: 'no-deadline-merchant',
+      deadline: null, // Explicitly no deadline
+    };
+
+    const event = await PaymentRequestProtocol.createPaymentRequestEvent(
+      requester,
+      target.getPublicKeyHex(),
+      request
+    );
+
+    const parsed = await PaymentRequestProtocol.parsePaymentRequest(event, target);
+
+    expect(parsed.deadline).toBeNull();
+    expect(PaymentRequestProtocol.isExpired(parsed)).toBe(false);
+    expect(PaymentRequestProtocol.getRemainingTimeMs(parsed)).toBeNull();
+  });
+
+  it('should use default deadline when not specified', async () => {
+    const before = Date.now();
+
+    const request = {
+      amount: BigInt(1_000_000_000),
+      coinId: SOLANA_COIN_ID,
+      recipientNametag: 'default-deadline-merchant',
+      // No deadline specified - should use default (5 minutes)
+    };
+
+    const event = await PaymentRequestProtocol.createPaymentRequestEvent(
+      requester,
+      target.getPublicKeyHex(),
+      request
+    );
+
+    const after = Date.now();
+    const parsed = await PaymentRequestProtocol.parsePaymentRequest(event, target);
+
+    expect(parsed.deadline).not.toBeNull();
+    // Default deadline is 5 minutes (300000ms)
+    expect(parsed.deadline).toBeGreaterThanOrEqual(before + PaymentRequestProtocol.DEFAULT_DEADLINE_MS - 1000);
+    expect(parsed.deadline).toBeLessThanOrEqual(after + PaymentRequestProtocol.DEFAULT_DEADLINE_MS + 1000);
+  });
+
+  it('should complete full decline workflow roundtrip', async () => {
+    // Simulate a complete workflow:
+    // 1. Requester creates payment request
+    // 2. Target receives and declines
+    // 3. Requester receives decline notification
+
+    // Step 1: Create request
+    const request = {
+      amount: BigInt(5_000_000_000),
+      coinId: SOLANA_COIN_ID,
+      message: 'Please pay me',
+      recipientNametag: 'alice-wallet',
+    };
+
+    const requestEvent = await PaymentRequestProtocol.createPaymentRequestEvent(
+      requester,
+      target.getPublicKeyHex(),
+      request
+    );
+
+    // Step 2: Target receives and parses
+    const targetParsed = await PaymentRequestProtocol.parsePaymentRequest(requestEvent, target);
+    expect(targetParsed.senderPubkey).toBe(requester.getPublicKeyHex());
+
+    // Step 3: Target decides to decline
+    const responseEvent = await PaymentRequestProtocol.createPaymentRequestResponseEvent(
+      target,
+      requester.getPublicKeyHex(),
+      {
+        requestId: targetParsed.requestId,
+        originalEventId: targetParsed.eventId,
+        status: PaymentRequestProtocol.ResponseStatus.DECLINED,
+        reason: 'I do not want to pay',
+      }
+    );
+
+    // Step 4: Requester receives and parses decline
+    const requesterParsed = await PaymentRequestProtocol.parsePaymentRequestResponse(responseEvent, requester);
+
+    // Verify the requester can match the response to the original request
+    expect(requesterParsed.originalEventId).toBe(requestEvent.id);
+    expect(requesterParsed.requestId).toBe(targetParsed.requestId);
+    expect(requesterParsed.status).toBe(PaymentRequestProtocol.ResponseStatus.DECLINED);
+    expect(requesterParsed.reason).toBe('I do not want to pay');
+    expect(requesterParsed.senderPubkey).toBe(target.getPublicKeyHex());
+  });
+
+  it('should work with filter building for responses', () => {
+    // Create filter for incoming payment request responses
+    const filter = Filter.builder()
+      .kinds(EventKinds.PAYMENT_REQUEST_RESPONSE)
+      .pTags(requester.getPublicKeyHex())
+      .since(Math.floor(Date.now() / 1000) - 3600)
+      .build();
+
+    const json = filter.toJSON();
+
+    expect(json.kinds).toContain(EventKinds.PAYMENT_REQUEST_RESPONSE);
+    expect(json['#p']).toContain(requester.getPublicKeyHex());
+    expect(json.since).toBeDefined();
+  });
+});
+
 describe('E2E: Complete Communication Flow', () => {
   it('should simulate full messaging flow', async () => {
     // Setup users

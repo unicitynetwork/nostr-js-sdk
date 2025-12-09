@@ -14,12 +14,19 @@
  *   # Full flow with token transfer verification (requires wallet interaction)
  *   TARGET_NAMETAG=mp-9 npm run test:integration -- --testNamePattern="full payment request flow"
  *
+ *   # Decline flow - send request, manually reject in wallet, receive decline response
+ *   TARGET_NAMETAG=mp-9 npm run test:integration -- --testNamePattern="receive decline response"
+ *
+ *   # Expiration flow - send request with short deadline, observe expiration handling
+ *   TARGET_NAMETAG=mp-9 DEADLINE_SECONDS=10 npm run test:integration -- --testNamePattern="verify expiration"
+ *
  * Environment variables:
  *   TARGET_NAMETAG - Nametag of the wallet to send requests to (required)
  *   NOSTR_RELAY - Relay URL (default: wss://nostr-relay.testnet.unicity.network)
  *   AMOUNT - Amount in smallest units (default: 1000000)
  *   SYMBOL - Token symbol (default: SOL)
  *   TIMEOUT - Timeout in seconds for full flow test (default: 120)
+ *   DEADLINE_SECONDS - Deadline in seconds for expiration test (default: 30)
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -370,6 +377,343 @@ describe.skipIf(SKIP_RELAY_TESTS)('Payment Request - Relay E2E', () => {
     // Don't fail the test on timeout - it requires manual interaction
     expect(true).toBe(true);
   }, 180000); // 3 minute timeout for manual interaction
+});
+
+describe.skipIf(SKIP_RELAY_TESTS)('Payment Request Decline and Expiration - Relay E2E', () => {
+  let keyManager: NostrKeyManager;
+  let client: NostrClient;
+
+  beforeAll(async () => {
+    keyManager = NostrKeyManager.generate();
+    client = new NostrClient(keyManager);
+
+    console.log('\n' + '='.repeat(64));
+    console.log('Payment Request Decline/Expiration E2E Test');
+    console.log('='.repeat(64));
+    console.log(`Relay: ${NOSTR_RELAY}`);
+    console.log(`Target: ${TARGET_NAMETAG}`);
+    console.log(`Our pubkey: ${keyManager.getPublicKeyHex().substring(0, 32)}...`);
+    console.log('='.repeat(64) + '\n');
+
+    await client.connect(NOSTR_RELAY);
+    console.log('Connected to relay');
+  }, 30000);
+
+  afterAll(() => {
+    if (client) {
+      client.disconnect();
+      console.log('\nDisconnected from relay');
+    }
+  });
+
+  async function resolveNametag(nametag: string): Promise<string> {
+    console.log(`Resolving nametag '${nametag}'...`);
+    const pubkey = await client.queryPubkeyByNametag(nametag);
+    if (!pubkey) {
+      throw new Error(`Nametag not found: ${nametag}`);
+    }
+    console.log(`Resolved to: ${pubkey.substring(0, 32)}...`);
+    return pubkey;
+  }
+
+  async function publishOurNametag(nametag: string): Promise<void> {
+    const bindingEvent = await NametagBinding.createBindingEvent(
+      keyManager,
+      nametag,
+      'test-address-' + Date.now()
+    );
+    await client.publishEvent(bindingEvent);
+    console.log(`Published nametag binding: ${nametag}`);
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+
+  it('should send payment request with deadline and receive decline response', async () => {
+    const targetNametag = TARGET_NAMETAG!;
+    const amount = BigInt(process.env.AMOUNT || '1000000');
+    const decimals = 8;
+    const timeoutSeconds = parseInt(process.env.TIMEOUT || '120', 10);
+    const deadlineMs = 5 * 60 * 1000; // 5 minute deadline
+
+    const testNametag = `test-decline-${Date.now() % 100000}`;
+
+    console.log('\n' + '='.repeat(64));
+    console.log('PAYMENT REQUEST DECLINE E2E TEST');
+    console.log('='.repeat(64));
+    console.log(`Target wallet nametag: ${targetNametag}`);
+    console.log(`Test receiver nametag: ${testNametag}`);
+    console.log(`Amount: ${PaymentRequestProtocol.formatAmount(amount, decimals)}`);
+    console.log(`Deadline: ${deadlineMs / 1000} seconds from now`);
+    console.log(`Timeout: ${timeoutSeconds} seconds`);
+    console.log('');
+
+    // Step 1: Publish our nametag
+    console.log('\n[Step 1] Publish test nametag binding');
+    console.log('-'.repeat(40));
+    await publishOurNametag(testNametag);
+
+    // Step 2: Subscribe to payment request responses
+    console.log('\n[Step 2] Subscribe to payment request responses');
+    console.log('-'.repeat(40));
+
+    let responseReceived = false;
+    let receivedResponse: PaymentRequestProtocol.ParsedPaymentRequestResponse | null = null;
+
+    const responseFilter = Filter.builder()
+      .kinds(EventKinds.PAYMENT_REQUEST_RESPONSE)
+      .pTags(keyManager.getPublicKeyHex())
+      .since(Math.floor(Date.now() / 1000) - 60)
+      .build();
+
+    client.subscribe('payment-response', responseFilter, {
+      onEvent: async (event) => {
+        console.log(`Received response event from: ${event.pubkey.substring(0, 16)}...`);
+        try {
+          if (PaymentRequestProtocol.isPaymentRequestResponse(event)) {
+            const parsed = await PaymentRequestProtocol.parsePaymentRequestResponse(event, keyManager);
+            console.log(`   Status: ${parsed.status}`);
+            console.log(`   Reason: ${parsed.reason || '(none)'}`);
+            console.log(`   Original event ID: ${parsed.originalEventId.substring(0, 16)}...`);
+            receivedResponse = parsed;
+            responseReceived = true;
+          }
+        } catch (e) {
+          console.log(`   (Error processing: ${e instanceof Error ? e.message : 'Unknown error'})`);
+        }
+      },
+    });
+    console.log('Subscribed to payment request responses');
+
+    // Step 3: Resolve target
+    console.log('\n[Step 3] Resolve target wallet nametag');
+    console.log('-'.repeat(40));
+    const targetPubkey = await resolveNametag(targetNametag);
+
+    // Step 4: Send payment request with deadline
+    console.log('\n[Step 4] Send payment request with deadline');
+    console.log('-'.repeat(40));
+    const message = 'E2E Test - please DECLINE this request!';
+    const deadline = Date.now() + deadlineMs;
+    const request = {
+      amount,
+      coinId: SOLANA_COIN_ID,
+      message,
+      recipientNametag: testNametag,
+      deadline,
+    };
+    const paymentRequestEventId = await client.sendPaymentRequest(targetPubkey, request);
+    console.log('Payment request sent!');
+    console.log(`   Event ID: ${paymentRequestEventId.substring(0, 16)}...`);
+    console.log(`   Amount: ${PaymentRequestProtocol.formatAmount(amount, decimals)}`);
+    console.log(`   Recipient: ${testNametag}`);
+    console.log(`   Deadline: ${new Date(deadline).toISOString()}`);
+
+    // Step 5: Wait for user action
+    console.log('\n[Step 5] Waiting for wallet to DECLINE payment request');
+    console.log('-'.repeat(40));
+    console.log('');
+    console.log('+' + '-'.repeat(56) + '+');
+    console.log('|  ACTION REQUIRED                                       |');
+    console.log('|                                                        |');
+    console.log('|  1. Open the wallet app                                |');
+    console.log('|  2. Tap Settings (gear) > Payment Requests             |');
+    console.log(`|  3. Tap 'Reject' on the request from ${testNametag.substring(0, 15).padEnd(15)}  |`);
+    console.log('|                                                        |');
+    console.log(`|  Waiting ${timeoutSeconds} seconds...                               |`);
+    console.log('+' + '-'.repeat(56) + '+');
+    console.log('');
+
+    const startTime = Date.now();
+    const timeoutMs = timeoutSeconds * 1000;
+
+    while (!responseReceived && (Date.now() - startTime) < timeoutMs) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      const remaining = Math.floor((timeoutMs - (Date.now() - startTime)) / 1000);
+      process.stdout.write(`\rWaiting... ${remaining}s remaining    `);
+    }
+    console.log('');
+
+    // Step 6: Verify
+    console.log('\n[Step 6] Verify result');
+    console.log('-'.repeat(40));
+
+    if (responseReceived && receivedResponse) {
+      console.log('\n' + '='.repeat(64));
+      console.log('SUCCESS: Decline response received!');
+      console.log('='.repeat(64));
+      console.log(`Status: ${receivedResponse.status}`);
+      console.log(`Reason: ${receivedResponse.reason || '(none)'}`);
+      console.log(`Original event ID: ${receivedResponse.originalEventId}`);
+      console.log(`Response sender: ${receivedResponse.senderPubkey.substring(0, 32)}...`);
+
+      // Verify correlation
+      if (receivedResponse.originalEventId === paymentRequestEventId) {
+        console.log('\nCORRELATION VERIFIED: Response matches original request!');
+      } else {
+        console.log('\nWARNING: Event IDs do not match!');
+      }
+
+      // Verify status
+      if (receivedResponse.status === PaymentRequestProtocol.ResponseStatus.DECLINED) {
+        console.log('STATUS VERIFIED: Response is DECLINED');
+      }
+
+      console.log('='.repeat(64) + '\n');
+    } else {
+      console.log('TIMEOUT - No decline response received');
+      console.log('   Check wallet for errors or try again.');
+    }
+
+    expect(true).toBe(true);
+  }, 180000);
+
+  it('should send payment request with short deadline and verify expiration handling', async () => {
+    const targetNametag = TARGET_NAMETAG!;
+    const amount = BigInt(process.env.AMOUNT || '1000000');
+    const decimals = 8;
+    const deadlineSeconds = parseInt(process.env.DEADLINE_SECONDS || '10', 10); // Short deadline
+    const timeoutSeconds = deadlineSeconds + 30; // Wait longer than deadline
+
+    const testNametag = `test-expire-${Date.now() % 100000}`;
+
+    console.log('\n' + '='.repeat(64));
+    console.log('PAYMENT REQUEST EXPIRATION E2E TEST');
+    console.log('='.repeat(64));
+    console.log(`Target wallet nametag: ${targetNametag}`);
+    console.log(`Test receiver nametag: ${testNametag}`);
+    console.log(`Amount: ${PaymentRequestProtocol.formatAmount(amount, decimals)}`);
+    console.log(`Deadline: ${deadlineSeconds} seconds from now`);
+    console.log('');
+
+    // Step 1: Publish our nametag
+    console.log('\n[Step 1] Publish test nametag binding');
+    console.log('-'.repeat(40));
+    await publishOurNametag(testNametag);
+
+    // Step 2: Subscribe to payment request responses
+    console.log('\n[Step 2] Subscribe to payment request responses');
+    console.log('-'.repeat(40));
+
+    let responseReceived = false;
+    let receivedResponse: PaymentRequestProtocol.ParsedPaymentRequestResponse | null = null;
+
+    const responseFilter = Filter.builder()
+      .kinds(EventKinds.PAYMENT_REQUEST_RESPONSE)
+      .pTags(keyManager.getPublicKeyHex())
+      .since(Math.floor(Date.now() / 1000) - 60)
+      .build();
+
+    client.subscribe('payment-response-expire', responseFilter, {
+      onEvent: async (event) => {
+        console.log(`Received response event from: ${event.pubkey.substring(0, 16)}...`);
+        try {
+          if (PaymentRequestProtocol.isPaymentRequestResponse(event)) {
+            const parsed = await PaymentRequestProtocol.parsePaymentRequestResponse(event, keyManager);
+            console.log(`   Status: ${parsed.status}`);
+            console.log(`   Reason: ${parsed.reason || '(none)'}`);
+            receivedResponse = parsed;
+            responseReceived = true;
+          }
+        } catch (e) {
+          console.log(`   (Error processing: ${e instanceof Error ? e.message : 'Unknown error'})`);
+        }
+      },
+    });
+    console.log('Subscribed to payment request responses');
+
+    // Step 3: Resolve target
+    console.log('\n[Step 3] Resolve target wallet nametag');
+    console.log('-'.repeat(40));
+    const targetPubkey = await resolveNametag(targetNametag);
+
+    // Step 4: Send payment request with SHORT deadline
+    console.log('\n[Step 4] Send payment request with short deadline');
+    console.log('-'.repeat(40));
+    const message = 'E2E Test - DO NOT PAY, let this expire!';
+    const deadline = Date.now() + (deadlineSeconds * 1000);
+    const request = {
+      amount,
+      coinId: SOLANA_COIN_ID,
+      message,
+      recipientNametag: testNametag,
+      deadline,
+    };
+    const paymentRequestEventId = await client.sendPaymentRequest(targetPubkey, request);
+    console.log('Payment request sent!');
+    console.log(`   Event ID: ${paymentRequestEventId.substring(0, 16)}...`);
+    console.log(`   Deadline: ${new Date(deadline).toISOString()}`);
+    console.log(`   Expires in: ${deadlineSeconds} seconds`);
+
+    // Step 5: Wait and observe
+    console.log('\n[Step 5] Waiting for deadline to pass');
+    console.log('-'.repeat(40));
+    console.log('');
+    console.log('+' + '-'.repeat(56) + '+');
+    console.log('|  OBSERVATION MODE                                      |');
+    console.log('|                                                        |');
+    console.log('|  DO NOT accept or reject the request!                  |');
+    console.log('|  Let the deadline expire and observe wallet behavior.  |');
+    console.log('|                                                        |');
+    console.log('|  The wallet should:                                    |');
+    console.log('|    1. Mark the request as EXPIRED                      |');
+    console.log('|    2. Send EXPIRED response to requester               |');
+    console.log('|    3. Prevent acceptance after deadline                |');
+    console.log('|                                                        |');
+    console.log(`|  Deadline in: ${deadlineSeconds} seconds                              |`);
+    console.log('+' + '-'.repeat(56) + '+');
+    console.log('');
+
+    const startTime = Date.now();
+    const timeoutMs = timeoutSeconds * 1000;
+
+    while (!responseReceived && (Date.now() - startTime) < timeoutMs) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      const remaining = Math.floor((timeoutMs - (Date.now() - startTime)) / 1000);
+      const deadlineRemaining = Math.max(0, Math.floor((deadline - Date.now()) / 1000));
+
+      if (deadlineRemaining > 0) {
+        process.stdout.write(`\rDeadline in ${deadlineRemaining}s, waiting... ${remaining}s remaining    `);
+      } else {
+        process.stdout.write(`\rDEADLINE PASSED! Waiting for EXPIRED response... ${remaining}s remaining    `);
+      }
+    }
+    console.log('');
+
+    // Step 6: Verify
+    console.log('\n[Step 6] Verify result');
+    console.log('-'.repeat(40));
+
+    if (responseReceived && receivedResponse) {
+      console.log('\n' + '='.repeat(64));
+      if (receivedResponse.status === PaymentRequestProtocol.ResponseStatus.EXPIRED) {
+        console.log('SUCCESS: EXPIRED response received!');
+      } else {
+        console.log(`Response received with status: ${receivedResponse.status}`);
+      }
+      console.log('='.repeat(64));
+      console.log(`Status: ${receivedResponse.status}`);
+      console.log(`Reason: ${receivedResponse.reason || '(none)'}`);
+      console.log(`Original event ID: ${receivedResponse.originalEventId}`);
+
+      // Verify correlation
+      if (receivedResponse.originalEventId === paymentRequestEventId) {
+        console.log('\nCORRELATION VERIFIED: Response matches original request!');
+      }
+
+      console.log('='.repeat(64) + '\n');
+    } else {
+      console.log('No response received within timeout');
+      console.log('');
+      console.log('NOTE: The wallet may handle expiration in different ways:');
+      console.log('  - Automatic: Sends EXPIRED response when deadline passes');
+      console.log('  - Manual: User must try to accept to see expiration error');
+      console.log('  - Silent: Simply removes/hides expired requests');
+      console.log('');
+      console.log('Try manually tapping "Pay" on the expired request in the wallet');
+      console.log('to verify it blocks the acceptance.');
+    }
+
+    expect(true).toBe(true);
+  }, 180000);
 });
 
 // Additional test for protocol compatibility

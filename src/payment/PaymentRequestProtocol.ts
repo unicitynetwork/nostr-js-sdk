@@ -10,6 +10,22 @@ import * as EventKinds from '../protocol/EventKinds.js';
 /** Prefix for payment request messages */
 const MESSAGE_PREFIX = 'payment_request:';
 
+/** Prefix for payment request response messages */
+const RESPONSE_PREFIX = 'payment_request_response:';
+
+/** Default deadline duration: 5 minutes in milliseconds */
+export const DEFAULT_DEADLINE_MS = 5 * 60 * 1000;
+
+/**
+ * Payment request response status.
+ */
+export enum ResponseStatus {
+  /** Payment request was declined by the recipient */
+  DECLINED = 'DECLINED',
+  /** Payment request expired (deadline passed) */
+  EXPIRED = 'EXPIRED',
+}
+
 /**
  * Payment request data structure.
  */
@@ -24,6 +40,22 @@ export interface PaymentRequest {
   recipientNametag: string;
   /** Unique request ID for tracking (auto-generated if not provided) */
   requestId?: string;
+  /** Deadline timestamp in milliseconds (Unix epoch). Null/undefined means default deadline (5 min). */
+  deadline?: number | null;
+}
+
+/**
+ * Payment request response data structure.
+ */
+export interface PaymentRequestResponse {
+  /** The original request ID being responded to */
+  requestId: string;
+  /** The original event ID being responded to */
+  originalEventId: string;
+  /** Response status (DECLINED, EXPIRED) */
+  status: ResponseStatus;
+  /** Optional reason for decline/expiration */
+  reason?: string;
 }
 
 /**
@@ -46,6 +78,28 @@ export interface ParsedPaymentRequest {
   timestamp: number;
   /** Original event ID */
   eventId: string;
+  /** Deadline timestamp in milliseconds, null if no deadline */
+  deadline: number | null;
+}
+
+/**
+ * Parsed payment request response from an event.
+ */
+export interface ParsedPaymentRequestResponse {
+  /** The original request ID */
+  requestId: string;
+  /** The original event ID */
+  originalEventId: string;
+  /** Response status */
+  status: ResponseStatus;
+  /** Optional reason */
+  reason?: string;
+  /** Sender's public key (who sent the response) */
+  senderPubkey: string;
+  /** Response event ID */
+  eventId: string;
+  /** Event timestamp */
+  timestamp: number;
 }
 
 /**
@@ -93,6 +147,15 @@ export async function createPaymentRequestEvent(
   // Generate request ID if not provided
   const requestId = request.requestId || generateRequestId();
 
+  // Calculate deadline: use provided value, or default to 5 minutes from now
+  // If explicitly set to null, no deadline
+  const deadline =
+    request.deadline === null
+      ? null
+      : request.deadline !== undefined
+        ? request.deadline
+        : Date.now() + DEFAULT_DEADLINE_MS;
+
   // Serialize request to JSON
   const requestJson = JSON.stringify({
     amount: String(request.amount), // Convert to string for JSON compatibility with bigint
@@ -100,6 +163,7 @@ export async function createPaymentRequestEvent(
     message: request.message,
     recipientNametag: request.recipientNametag,
     requestId: requestId,
+    deadline: deadline,
   });
 
   // Add prefix and encrypt
@@ -185,6 +249,7 @@ export async function parsePaymentRequest(
     senderPubkey: event.pubkey,
     timestamp: event.created_at * 1000, // Convert to milliseconds
     eventId: event.id,
+    deadline: parsed.deadline !== undefined ? parsed.deadline : null,
   };
 }
 
@@ -297,4 +362,168 @@ export function parseAmount(amountStr: string, decimals: number = 8): bigint {
   const fractionalPart = BigInt(fractionalStr);
 
   return wholePart * multiplier + fractionalPart;
+}
+
+// ============================================================================
+// Payment Request Response Functions
+// ============================================================================
+
+/**
+ * Check if a parsed payment request has expired.
+ * @param request Parsed payment request
+ * @returns true if the request has a deadline and it has passed
+ */
+export function isExpired(request: ParsedPaymentRequest): boolean {
+  return request.deadline !== null && Date.now() > request.deadline;
+}
+
+/**
+ * Get remaining time until deadline in milliseconds.
+ * @param request Parsed payment request
+ * @returns Remaining time in ms, 0 if expired, null if no deadline
+ */
+export function getRemainingTimeMs(request: ParsedPaymentRequest): number | null {
+  if (request.deadline === null) return null;
+  const remaining = request.deadline - Date.now();
+  return remaining > 0 ? remaining : 0;
+}
+
+/**
+ * Create a payment request response event (for decline/expiration).
+ *
+ * Event structure:
+ * - Kind: 31116 (PAYMENT_REQUEST_RESPONSE)
+ * - Tags:
+ *   - ["p", "<target_pubkey_hex>"] - Original requester
+ *   - ["type", "payment_request_response"]
+ *   - ["status", "DECLINED" | "EXPIRED"]
+ *   - ["e", "<original_event_id>", "", "reply"] - Reference to original request
+ * - Content: NIP-04 encrypted response JSON
+ *
+ * @param keyManager Key manager with signing keys
+ * @param targetPubkeyHex Original requester's public key
+ * @param response Response details
+ * @returns Signed event
+ */
+export async function createPaymentRequestResponseEvent(
+  keyManager: NostrKeyManager,
+  targetPubkeyHex: string,
+  response: PaymentRequestResponse
+): Promise<Event> {
+  // Serialize response to JSON
+  const responseJson = JSON.stringify({
+    requestId: response.requestId,
+    originalEventId: response.originalEventId,
+    status: response.status,
+    reason: response.reason,
+  });
+
+  // Add prefix and encrypt
+  const message = RESPONSE_PREFIX + responseJson;
+  const encryptedContent = await keyManager.encryptHex(message, targetPubkeyHex);
+
+  // Build tags
+  const tags: string[][] = [
+    ['p', targetPubkeyHex],
+    ['type', 'payment_request_response'],
+    ['status', response.status],
+  ];
+
+  // Add reference to original event
+  if (response.originalEventId) {
+    tags.push(['e', response.originalEventId, '', 'reply']);
+  }
+
+  const event = Event.create(keyManager, {
+    kind: EventKinds.PAYMENT_REQUEST_RESPONSE,
+    tags,
+    content: encryptedContent,
+  });
+
+  return event;
+}
+
+/**
+ * Parse a payment request response event.
+ * Decrypts and parses the response data.
+ *
+ * @param event Payment request response event
+ * @param keyManager Key manager for decryption
+ * @returns Parsed payment request response
+ * @throws Error if the event is not a valid payment request response
+ */
+export async function parsePaymentRequestResponse(
+  event: Event,
+  keyManager: NostrKeyManager
+): Promise<ParsedPaymentRequestResponse> {
+  // Verify event kind
+  if (event.kind !== EventKinds.PAYMENT_REQUEST_RESPONSE) {
+    throw new Error('Event is not a payment request response');
+  }
+
+  // Determine the peer's public key for decryption
+  let peerPubkeyHex: string;
+  if (keyManager.isMyPublicKey(event.pubkey)) {
+    // We sent this response, decrypt with target's key
+    const targetPubkey = event.getTagValue('p');
+    if (!targetPubkey) {
+      throw new Error('No target found in event');
+    }
+    peerPubkeyHex = targetPubkey;
+  } else {
+    // We received this response, decrypt with sender's key
+    peerPubkeyHex = event.pubkey;
+  }
+
+  // Decrypt the content
+  const decrypted = await keyManager.decryptHex(event.content, peerPubkeyHex);
+
+  // Validate prefix
+  if (!decrypted.startsWith(RESPONSE_PREFIX)) {
+    throw new Error('Invalid payment request response format: missing prefix');
+  }
+
+  // Parse JSON
+  const responseJson = decrypted.slice(RESPONSE_PREFIX.length);
+  const parsed = JSON.parse(responseJson);
+
+  return {
+    requestId: parsed.requestId,
+    originalEventId: parsed.originalEventId,
+    status: parsed.status as ResponseStatus,
+    reason: parsed.reason,
+    senderPubkey: event.pubkey,
+    eventId: event.id,
+    timestamp: event.created_at * 1000,
+  };
+}
+
+/**
+ * Check if an event is a payment request response.
+ * @param event Event to check
+ * @returns true if the event is a payment request response
+ */
+export function isPaymentRequestResponse(event: Event): boolean {
+  return (
+    event.kind === EventKinds.PAYMENT_REQUEST_RESPONSE &&
+    event.getTagValue('type') === 'payment_request_response'
+  );
+}
+
+/**
+ * Get the response status from a payment request response event (from unencrypted tag).
+ * @param event Payment request response event
+ * @returns Status string, or undefined if not found
+ */
+export function getResponseStatus(event: Event): string | undefined {
+  return event.getTagValue('status');
+}
+
+/**
+ * Get the referenced original event ID from the response event.
+ * @param event Payment request response event
+ * @returns Original event ID, or undefined if not found
+ */
+export function getOriginalEventId(event: Event): string | undefined {
+  return event.getTagValue('e');
 }

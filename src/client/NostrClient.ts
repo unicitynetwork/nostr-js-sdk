@@ -754,6 +754,7 @@ export class NostrClient {
       message?: string;
       recipientNametag: string;
       requestId?: string;
+      deadline?: number | null;
     }
   ): Promise<string> {
     const PaymentRequestProtocol = await import('../payment/PaymentRequestProtocol.js');
@@ -763,6 +764,60 @@ export class NostrClient {
       request
     );
     return this.publishEvent(event);
+  }
+
+  /**
+   * Send a payment request response (decline/expiration notification).
+   * @param targetPubkeyHex Original requester's public key
+   * @param response Response details
+   * @returns Promise that resolves with the event ID
+   */
+  async sendPaymentRequestResponse(
+    targetPubkeyHex: string,
+    response: {
+      requestId: string;
+      originalEventId: string;
+      status: 'DECLINED' | 'EXPIRED';
+      reason?: string;
+    }
+  ): Promise<string> {
+    const PaymentRequestProtocol = await import('../payment/PaymentRequestProtocol.js');
+    const event = await PaymentRequestProtocol.createPaymentRequestResponseEvent(
+      this.keyManager,
+      targetPubkeyHex,
+      {
+        requestId: response.requestId,
+        originalEventId: response.originalEventId,
+        status: response.status === 'DECLINED'
+          ? PaymentRequestProtocol.ResponseStatus.DECLINED
+          : PaymentRequestProtocol.ResponseStatus.EXPIRED,
+        reason: response.reason,
+      }
+    );
+    return this.publishEvent(event);
+  }
+
+  /**
+   * Send a payment request decline response.
+   * Convenience method for declining a payment request.
+   * @param originalRequestSenderPubkey Pubkey of who sent the original payment request
+   * @param originalEventId Event ID of the original payment request
+   * @param requestId Request ID from the original payment request
+   * @param reason Optional reason for declining
+   * @returns Promise that resolves with the event ID
+   */
+  async sendPaymentRequestDecline(
+    originalRequestSenderPubkey: string,
+    originalEventId: string,
+    requestId: string,
+    reason?: string
+  ): Promise<string> {
+    return this.sendPaymentRequestResponse(originalRequestSenderPubkey, {
+      requestId,
+      originalEventId,
+      status: 'DECLINED',
+      reason,
+    });
   }
 
   /**
