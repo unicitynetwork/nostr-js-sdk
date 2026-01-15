@@ -17,6 +17,7 @@ describe('EventKinds', () => {
       expect(EventKinds.REACTION).toBe(7);
       expect(EventKinds.GIFT_WRAP).toBe(1059);
       expect(EventKinds.RELAY_LIST).toBe(10002);
+      expect(EventKinds.AUTH).toBe(22242);
       expect(EventKinds.APP_DATA).toBe(30078);
     });
 

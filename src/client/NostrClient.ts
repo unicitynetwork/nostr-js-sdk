@@ -482,6 +482,9 @@ export class NostrClient {
         case 'CLOSED':
           this.handleClosedMessage(json);
           break;
+        case 'AUTH':
+          this.handleAuthMessage(_url, json);
+          break;
       }
     } catch {
       // Ignore malformed messages
@@ -567,6 +570,36 @@ export class NostrClient {
     if (subscription?.listener.onError) {
       subscription.listener.onError(subscriptionId, `Subscription closed: ${message}`);
     }
+  }
+
+  /**
+   * Handle AUTH message from relay (NIP-42 authentication challenge).
+   */
+  private handleAuthMessage(relayUrl: string, json: unknown[]): void {
+    if (json.length < 2) return;
+
+    const challenge = json[1] as string;
+    const relay = this.relays.get(relayUrl);
+    if (!relay?.socket || !relay.connected) return;
+
+    // Create and sign the auth event (kind 22242)
+    const authEvent = Event.create(this.keyManager, {
+      kind: EventKinds.AUTH,
+      tags: [
+        ['relay', relayUrl],
+        ['challenge', challenge],
+      ],
+      content: '',
+    });
+
+    // Send AUTH response
+    const message = JSON.stringify(['AUTH', authEvent.toJSON()]);
+    relay.socket.send(message);
+
+    // Re-send subscriptions after auth (relay may have ignored pre-auth requests)
+    setTimeout(() => {
+      this.resubscribeAll(relayUrl);
+    }, 100);
   }
 
   /**
