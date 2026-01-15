@@ -43,6 +43,9 @@ export const GIFT_WRAP = 1059;
 /** NIP-65: Relay list metadata */
 export const RELAY_LIST = 10002;
 
+/** NIP-42: Client authentication to relay */
+export const AUTH = 22242;
+
 /** NIP-78: Application-specific data (parameterized replaceable) */
 export const APP_DATA = 30078;
 

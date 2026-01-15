@@ -5,6 +5,7 @@ A TypeScript SDK for Nostr protocol with Unicity extensions. Works in both Node.
 ## Features
 
 - **NIP-17 Private Messages** - Gift-wrapped private direct messages with sender anonymity
+- **NIP-42 Client Authentication** - Automatic relay authentication for protected relays
 - **NIP-44 Encryption** - Modern ChaCha20-Poly1305 AEAD encryption with HKDF
 - **BIP-340 Schnorr Signatures** - Full support for secp256k1 Schnorr signatures
 - **NIP-04 Encryption** - Legacy AES-256-CBC encryption with ECDH key agreement
@@ -470,6 +471,7 @@ const parsed = await PaymentRequestProtocol.parsePaymentRequest(event, keyManage
 | 14 | CHAT_MESSAGE | Private direct message rumor (NIP-17) |
 | 15 | READ_RECEIPT | Read receipt rumor (NIP-17) |
 | 1059 | GIFT_WRAP | Gift-wrapped message (NIP-17) |
+| 22242 | AUTH | Client authentication to relay (NIP-42) |
 | 30078 | APP_DATA | Application-specific data (nametag bindings) |
 | 31111 | AGENT_PROFILE | Agent profile information |
 | 31112 | AGENT_LOCATION | Agent GPS location |
