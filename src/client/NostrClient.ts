@@ -28,6 +28,14 @@ const DEFAULT_MAX_RECONNECT_INTERVAL_MS = 30000;
 const DEFAULT_PING_INTERVAL_MS = 30000;
 
 /**
+ * Delay before resubscribing after NIP-42 authentication.
+ * This gives the relay time to process the AUTH response before we send
+ * subscription requests. Without this delay, some relays may still reject
+ * the subscriptions as the AUTH hasn't been fully processed yet.
+ */
+const AUTH_RESUBSCRIBE_DELAY_MS = 100;
+
+/**
  * Options for configuring NostrClient behavior.
  */
 export interface NostrClientOptions {
@@ -599,7 +607,7 @@ export class NostrClient {
     // Re-send subscriptions after auth (relay may have ignored pre-auth requests)
     setTimeout(() => {
       this.resubscribeAll(relayUrl);
-    }, 100);
+    }, AUTH_RESUBSCRIBE_DELAY_MS);
   }
 
   /**
