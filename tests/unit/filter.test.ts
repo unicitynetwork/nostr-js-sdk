@@ -81,6 +81,22 @@ describe('Filter', () => {
       expect(filter['#d']).toEqual(['identifier']);
     });
 
+    it('should build filter with hTags (NIP-29 group IDs)', () => {
+      const filter = Filter.builder()
+        .hTags('group1', 'group2')
+        .build();
+
+      expect(filter['#h']).toEqual(['group1', 'group2']);
+    });
+
+    it('should build filter with hTags array', () => {
+      const filter = Filter.builder()
+        .hTags(['group1', 'group2'])
+        .build();
+
+      expect(filter['#h']).toEqual(['group1', 'group2']);
+    });
+
     it('should build filter with time range', () => {
       const filter = Filter.builder()
         .since(1000)
@@ -108,6 +124,7 @@ describe('Filter', () => {
         .pTags('pubkey1')
         .tTags('topic1')
         .dTags('d1')
+        .hTags('group1')
         .since(1000)
         .until(2000)
         .limit(50)
@@ -120,6 +137,7 @@ describe('Filter', () => {
       expect(filter['#p']).toEqual(['pubkey1']);
       expect(filter['#t']).toEqual(['topic1']);
       expect(filter['#d']).toEqual(['d1']);
+      expect(filter['#h']).toEqual(['group1']);
       expect(filter.since).toBe(1000);
       expect(filter.until).toBe(2000);
       expect(filter.limit).toBe(50);
@@ -186,12 +204,14 @@ describe('Filter', () => {
         '#p': ['p1'],
         '#t': ['t1'],
         '#d': ['d1'],
+        '#h': ['h1'],
       });
 
       expect(filter['#e']).toEqual(['e1']);
       expect(filter['#p']).toEqual(['p1']);
       expect(filter['#t']).toEqual(['t1']);
       expect(filter['#d']).toEqual(['d1']);
+      expect(filter['#h']).toEqual(['h1']);
     });
   });
 
@@ -234,6 +254,22 @@ describe('Filter', () => {
 
       expect(filter.kinds).toEqual([30078]);
       expect(filter['#t']).toEqual([hashedNametag]);
+    });
+
+    it('should create filter for NIP-29 group messages', () => {
+      const groupId = 'my-group-id';
+
+      const filter = Filter.builder()
+        .kinds(9) // NIP-29 group chat message
+        .hTags(groupId)
+        .limit(50)
+        .build();
+
+      expect(filter.toJSON()).toEqual({
+        kinds: [9],
+        '#h': [groupId],
+        limit: 50,
+      });
     });
   });
 });

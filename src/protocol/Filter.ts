@@ -28,6 +28,9 @@ export interface FilterData {
   /** Identifiers for parameterized replaceable events ("d" tags) */
   '#d'?: string[];
 
+  /** Group IDs for NIP-29 group messages ("h" tags) */
+  '#h'?: string[];
+
   /** Minimum timestamp (inclusive, Unix seconds) */
   since?: number;
 
@@ -50,6 +53,7 @@ export class Filter implements FilterData {
   '#p'?: string[];
   '#t'?: string[];
   '#d'?: string[];
+  '#h'?: string[];
   since?: number;
   until?: number;
   limit?: number;
@@ -67,6 +71,7 @@ export class Filter implements FilterData {
       if (data['#p']) this['#p'] = [...data['#p']];
       if (data['#t']) this['#t'] = [...data['#t']];
       if (data['#d']) this['#d'] = [...data['#d']];
+      if (data['#h']) this['#h'] = [...data['#h']];
       if (data.since !== undefined) this.since = data.since;
       if (data.until !== undefined) this.until = data.until;
       if (data.limit !== undefined) this.limit = data.limit;
@@ -96,6 +101,7 @@ export class Filter implements FilterData {
     if (this['#p'] && this['#p'].length > 0) result['#p'] = this['#p'];
     if (this['#t'] && this['#t'].length > 0) result['#t'] = this['#t'];
     if (this['#d'] && this['#d'].length > 0) result['#d'] = this['#d'];
+    if (this['#h'] && this['#h'].length > 0) result['#h'] = this['#h'];
     if (this.since !== undefined) result.since = this.since;
     if (this.until !== undefined) result.until = this.until;
     if (this.limit !== undefined) result.limit = this.limit;
@@ -228,6 +234,22 @@ export class FilterBuilder {
       this.data['#d'] = [...dTagsOrFirst];
     } else {
       this.data['#d'] = [dTagsOrFirst, ...rest];
+    }
+    return this;
+  }
+
+  /**
+   * Set "h" tags to match (NIP-29 group IDs).
+   * @param hTags Group IDs referenced by "h" tags (variadic or array)
+   * @returns This builder for chaining
+   */
+  hTags(...hTags: string[]): FilterBuilder;
+  hTags(hTags: string[]): FilterBuilder;
+  hTags(hTagsOrFirst: string | string[], ...rest: string[]): FilterBuilder {
+    if (Array.isArray(hTagsOrFirst)) {
+      this.data['#h'] = [...hTagsOrFirst];
+    } else {
+      this.data['#h'] = [hTagsOrFirst, ...rest];
     }
     return this;
   }
