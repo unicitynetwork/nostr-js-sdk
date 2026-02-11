@@ -272,6 +272,8 @@ PaymentRequestProtocol.parseAmount('1.5', 8); // BigInt(150_000_000) (8 decimals
 
 ### Nametag Bindings
 
+Nametags are lowercase alphanumeric strings (`[a-z0-9_-]`, 3–20 chars) or phone numbers (E.164 format). All input is normalized to lowercase before hashing. Use `isValidNametag(input)` to validate.
+
 ```typescript
 import { NametagBinding, NametagUtils } from '@unicitylabs/nostr-sdk';
 

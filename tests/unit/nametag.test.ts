@@ -117,6 +117,58 @@ describe('NametagUtils', () => {
       expect(NametagUtils.isPhoneNumber('alice', 'US')).toBe(false);
     });
   });
+
+  describe('isValidNametag', () => {
+    it('should accept valid lowercase nametags', () => {
+      expect(NametagUtils.isValidNametag('alice')).toBe(true);
+      expect(NametagUtils.isValidNametag('bob_42')).toBe(true);
+      expect(NametagUtils.isValidNametag('my-wallet')).toBe(true);
+    });
+
+    it('should accept uppercase input (normalized to lowercase)', () => {
+      expect(NametagUtils.isValidNametag('@Alice')).toBe(true);
+      expect(NametagUtils.isValidNametag('BOB')).toBe(true);
+    });
+
+    it('should reject too short nametags', () => {
+      expect(NametagUtils.isValidNametag('ab')).toBe(false);
+      expect(NametagUtils.isValidNametag('a')).toBe(false);
+    });
+
+    it('should reject too long nametags', () => {
+      expect(NametagUtils.isValidNametag('a'.repeat(21))).toBe(false);
+    });
+
+    it('should accept nametags at boundary lengths', () => {
+      expect(NametagUtils.isValidNametag('abc')).toBe(true); // min length
+      expect(NametagUtils.isValidNametag('a'.repeat(20))).toBe(true); // max length
+    });
+
+    it('should reject nametags with invalid characters', () => {
+      expect(NametagUtils.isValidNametag('hello world')).toBe(false);
+      expect(NametagUtils.isValidNametag('a]b')).toBe(false);
+      expect(NametagUtils.isValidNametag('foo.bar')).toBe(false);
+    });
+
+    it('should accept valid phone numbers', () => {
+      expect(NametagUtils.isValidNametag('+14155552671', 'US')).toBe(true);
+      expect(NametagUtils.isValidNametag('415-555-2671', 'US')).toBe(true);
+    });
+
+    it('should strip @unicity suffix before validation', () => {
+      expect(NametagUtils.isValidNametag('alice@unicity')).toBe(true);
+    });
+  });
+
+  describe('constants', () => {
+    it('should export NAMETAG_MIN_LENGTH', () => {
+      expect(NametagUtils.NAMETAG_MIN_LENGTH).toBe(3);
+    });
+
+    it('should export NAMETAG_MAX_LENGTH', () => {
+      expect(NametagUtils.NAMETAG_MAX_LENGTH).toBe(20);
+    });
+  });
 });
 
 describe('NametagBinding', () => {

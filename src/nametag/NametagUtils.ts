@@ -10,6 +10,12 @@ import { parsePhoneNumber, isValidPhoneNumber, CountryCode } from 'libphonenumbe
 /** Salt prefix for nametag hashing */
 const NAMETAG_SALT = 'unicity:nametag:';
 
+/** Minimum nametag length (after normalization) */
+export const NAMETAG_MIN_LENGTH = 3;
+
+/** Maximum nametag length (after normalization) */
+export const NAMETAG_MAX_LENGTH = 20;
+
 /** Default country code for phone number normalization */
 const DEFAULT_COUNTRY = 'US';
 
@@ -184,4 +190,29 @@ export function isPhoneNumber(
   } catch {
     return false;
   }
+}
+
+/**
+ * Validate a nametag string. Strips leading @, normalizes, then checks format.
+ * Regular nametags: lowercase alphanumeric, underscore, hyphen, 3-20 chars.
+ * Phone numbers: validated via libphonenumber-js.
+ * @param nametag Nametag to validate
+ * @param defaultCountry Default country code for phone normalization
+ * @returns true if the nametag is valid
+ */
+export function isValidNametag(
+  nametag: string,
+  defaultCountry: string = DEFAULT_COUNTRY
+): boolean {
+  const stripped = nametag.startsWith('@') ? nametag.slice(1) : nametag;
+  const normalized = normalizeNametag(stripped, defaultCountry);
+
+  if (isPhoneNumber(normalized)) {
+    return true;
+  }
+
+  const pattern = new RegExp(
+    `^[a-z0-9_-]{${NAMETAG_MIN_LENGTH},${NAMETAG_MAX_LENGTH}}$`
+  );
+  return pattern.test(normalized);
 }
