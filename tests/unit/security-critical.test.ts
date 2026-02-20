@@ -4,7 +4,7 @@
  * Techniques: [RB] Risk-Based Testing
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { bytesToHex } from '@noble/hashes/utils';
 import { NostrKeyManager } from '../../src/NostrKeyManager.js';
 import { Event } from '../../src/protocol/Event.js';
@@ -65,8 +65,8 @@ describe('Security Critical Paths', () => {
       expect(() => km.deriveConversationKey(other.getPublicKey())).toThrow(/has been cleared/);
     });
 
-    // [RB] Memory zeroing
-    it('should zero private key memory on clear', () => {
+    // [RB] Input copy semantics — fromPrivateKey copies, doesn't alias
+    it('should not mutate the original input array on clear', () => {
       const privateKeyBytes = new Uint8Array(32).fill(0x42);
       const km = NostrKeyManager.fromPrivateKey(privateKeyBytes);
 
@@ -76,8 +76,9 @@ describe('Security Critical Paths', () => {
 
       km.clear();
 
-      // Original input should be unchanged (was copied)
+      // Original input should be unchanged (was copied, not aliased)
       expect(privateKeyBytes[0]).toBe(0x42);
+      expect(privateKeyBytes.every(b => b === 0x42)).toBe(true);
     });
   });
 

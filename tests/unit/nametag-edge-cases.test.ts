@@ -71,11 +71,10 @@ describe('Nametag Edge Cases', () => {
     });
 
     it('should handle 7-digit number (at threshold)', () => {
-      const normalized = NametagUtils.normalizeNametag('1234567');
       // Exactly 7 digits, 100% ratio, treated as phone
       // May or may not be valid depending on country
-      const result = NametagUtils.normalizeNametag('1234567');
-      expect(result).toBeDefined();
+      const normalized = NametagUtils.normalizeNametag('1234567');
+      expect(normalized).toBeDefined();
     });
   });
 

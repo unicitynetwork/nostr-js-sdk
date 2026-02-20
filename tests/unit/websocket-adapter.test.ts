@@ -4,7 +4,7 @@
  * Techniques: [EP] Equivalence Partitioning, [BVA] Boundary Value Analysis, [EG] Error Guessing
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import {
   extractMessageData,
   createWebSocket,
@@ -34,14 +34,14 @@ describe('WebSocketAdapter', () => {
     // [EP] Valid: Node.js Buffer data
     it('should extract string data from Node.js Buffer message', () => {
       const buf = Buffer.from('hello', 'utf-8');
-      const event: WebSocketMessageEvent = { data: buf as unknown as string };
+      const event = { data: buf } as unknown as WebSocketMessageEvent;
       expect(extractMessageData(event)).toBe('hello');
     });
 
     // [EP] Invalid: Blob data throws error
     it('should throw for Blob messages', () => {
       const blob = new Blob(['hello']);
-      const event: WebSocketMessageEvent = { data: blob as unknown as string };
+      const event = { data: blob } as unknown as WebSocketMessageEvent;
       expect(() => extractMessageData(event)).toThrow('Blob messages are not supported');
     });
 
@@ -94,13 +94,12 @@ describe('WebSocketAdapter', () => {
 
   describe('createWebSocket', () => {
     // [EP] Node.js environment uses ws package
-    it('should create a WebSocket in Node.js environment', async () => {
-      // In the test environment (Node.js), createWebSocket should try to use ws
-      // We test that it doesn't throw for a valid URL format
-      // (connection will fail since no server, but creation should work)
-      // We can't easily test the full connection without a server,
-      // so we verify the function exists and is callable
-      expect(typeof createWebSocket).toBe('function');
+    it('should return a WebSocket instance in Node.js environment', async () => {
+      const ws = await createWebSocket('wss://relay.example.com');
+      // Suppress async connection errors — no server is running
+      ws.onerror = () => {};
+      expect(ws).toBeDefined();
+      expect(ws.readyState).toBeDefined();
     });
   });
 });

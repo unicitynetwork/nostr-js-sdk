@@ -213,10 +213,9 @@ describe('NostrClient', () => {
     });
 
     it('should handle multiple disconnect calls gracefully [EG]', () => {
-      client.disconnect();
-      client.disconnect();
-      client.disconnect();
-      expect(true).toBe(true);
+      expect(() => client.disconnect()).not.toThrow();
+      expect(() => client.disconnect()).not.toThrow();
+      expect(() => client.disconnect()).not.toThrow();
     });
 
     it('should return key manager', () => {
@@ -359,6 +358,7 @@ describe('NostrClient', () => {
       const reqsBefore = socket3.sentMessages.filter(m => {
         try { return JSON.parse(m)[0] === 'REQ'; } catch { return false; }
       });
+      expect(reqsBefore.length).toBe(0);
 
       await vi.advanceTimersByTimeAsync(100);
 
@@ -452,7 +452,7 @@ describe('NostrClient', () => {
 
     it('should resolve after 5s timeout even without OK [BVA]', async () => {
       vi.useFakeTimers();
-      const socket = await connectClient(client);
+      await connectClient(client);
 
       const event = createTestEvent(keyManager);
       const publishPromise = client.publishEvent(event);
@@ -701,7 +701,7 @@ describe('NostrClient', () => {
   // ==========================================================
   describe('Feature 9: Disconnect Cleanup', () => {
     it('should reject all pending OK promises on disconnect', async () => {
-      const socket = await connectClient(client);
+      await connectClient(client);
 
       const event1 = createTestEvent(keyManager, 'ev1');
       const event2 = createTestEvent(keyManager, 'ev2');
@@ -872,7 +872,7 @@ describe('NostrClient', () => {
     });
 
     it('should handle rapid subscribe/unsubscribe', async () => {
-      await connectClient(client);
+      const socket = await connectClient(client);
 
       for (let i = 0; i < 50; i++) {
         const subId = client.subscribe(
@@ -882,7 +882,11 @@ describe('NostrClient', () => {
         client.unsubscribe(subId);
       }
 
-      expect(true).toBe(true);
+      // Verify all CLOSE messages were sent for each subscription
+      const closeMessages = socket.sentMessages.filter(m => {
+        try { return JSON.parse(m)[0] === 'CLOSE'; } catch { return false; }
+      });
+      expect(closeMessages.length).toBe(50);
     });
 
     it('disconnect while publish is pending rejects the pending promise', async () => {
