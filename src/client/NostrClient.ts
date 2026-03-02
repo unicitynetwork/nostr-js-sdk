@@ -863,15 +863,26 @@ export class NostrClient {
 
   /**
    * Publish a nametag binding.
+   * Checks for existing claims by other pubkeys before publishing.
    * @param nametagId Nametag identifier
    * @param unicityAddress Unicity address
    * @returns Promise that resolves with success status
+   * @throws Error if nametag is invalid or already claimed by another pubkey
    */
   async publishNametagBinding(
     nametagId: string,
     unicityAddress: string
   ): Promise<boolean> {
     const NametagBinding = await import('../nametag/NametagBinding.js');
+
+    // Check if already claimed by another pubkey
+    const existingOwner = await this.queryPubkeyByNametag(nametagId);
+    if (existingOwner && existingOwner !== this.keyManager.getPublicKeyHex()) {
+      throw new Error(
+        `Nametag "${nametagId}" is already claimed by another pubkey`
+      );
+    }
+
     const event = await NametagBinding.createBindingEvent(
       this.keyManager,
       nametagId,
@@ -971,13 +982,13 @@ export class NostrClient {
       }, this.queryTimeoutMs);
 
       let result: string | null = null;
-      let latestCreatedAt = 0;
+      let earliestCreatedAt = Infinity;
 
       const subscriptionId = this.subscribe(filter, {
         onEvent: (event) => {
-          // Keep the most recent binding
-          if (event.created_at > latestCreatedAt) {
-            latestCreatedAt = event.created_at;
+          // First-seen wins: keep the earliest binding to prevent hijacking
+          if (event.created_at < earliestCreatedAt) {
+            earliestCreatedAt = event.created_at;
             result = event.pubkey;
           }
         },

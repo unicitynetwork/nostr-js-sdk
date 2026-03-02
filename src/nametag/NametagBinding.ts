@@ -45,6 +45,10 @@ export async function createBindingEvent(
   unicityAddress: string,
   defaultCountry: string = DEFAULT_COUNTRY
 ): Promise<Event> {
+  if (!NametagUtils.isValidNametag(nametagId, defaultCountry)) {
+    throw new Error(`Invalid nametag: "${nametagId}". Must be 3-20 chars [a-z0-9_-] or a valid phone number.`);
+  }
+
   const hashedNametag = NametagUtils.hashNametag(nametagId, defaultCountry);
 
   const content: BindingContent = {

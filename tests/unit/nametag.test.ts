@@ -191,6 +191,37 @@ describe('NametagBinding', () => {
       expect(event.verify()).toBe(true);
     });
 
+    it('should reject invalid nametags', async () => {
+      await expect(
+        NametagBinding.createBindingEvent(keyManager, 'ab', 'addr')
+      ).rejects.toThrow(/Invalid nametag/);
+
+      await expect(
+        NametagBinding.createBindingEvent(keyManager, '', 'addr')
+      ).rejects.toThrow(/Invalid nametag/);
+
+      await expect(
+        NametagBinding.createBindingEvent(keyManager, 'a'.repeat(21), 'addr')
+      ).rejects.toThrow(/Invalid nametag/);
+
+      await expect(
+        NametagBinding.createBindingEvent(keyManager, 'foo.bar', 'addr')
+      ).rejects.toThrow(/Invalid nametag/);
+
+      await expect(
+        NametagBinding.createBindingEvent(keyManager, 'hello world', 'addr')
+      ).rejects.toThrow(/Invalid nametag/);
+    });
+
+    it('should accept valid phone numbers', async () => {
+      const event = await NametagBinding.createBindingEvent(
+        keyManager,
+        '+14155552671',
+        'addr'
+      );
+      expect(event.verify()).toBe(true);
+    });
+
     it('should include required tags', async () => {
       const event = await NametagBinding.createBindingEvent(
         keyManager,
