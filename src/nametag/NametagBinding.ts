@@ -12,9 +12,6 @@ import * as NametagUtils from './NametagUtils.js';
 /** Default country code for phone number normalization (shared with NametagUtils) */
 const DEFAULT_COUNTRY = 'US';
 
-/** Maximum number of events to buffer per query (bounds memory usage for contested nametags) */
-const QUERY_EVENT_LIMIT = 100;
-
 /**
  * Binding event content structure
  */
@@ -110,6 +107,7 @@ export async function createBindingEvent(
     ['nametag', hashedNametag],
     ['t', hashedNametag],
     ['address', unicityAddress],
+    ['t', NametagUtils.hashAddressForTag(unicityAddress)],
   ];
 
   // Add extended identity fields when provided
@@ -171,7 +169,6 @@ export function createNametagToPubkeyFilter(
   return Filter.builder()
     .kinds(EventKinds.APP_DATA)
     .tTags(hashedNametag)
-    .limit(QUERY_EVENT_LIMIT)
     .build();
 }
 
@@ -188,7 +185,6 @@ export function createAddressToBindingFilter(address: string): Filter {
   return Filter.builder()
     .kinds(EventKinds.APP_DATA)
     .tTags(hashedAddress)
-    .limit(QUERY_EVENT_LIMIT)
     .build();
 }
 
@@ -209,10 +205,11 @@ export function createPubkeyToNametagFilter(nostrPubkey: string): Filter {
 
 /**
  * Parse binding info from an event.
- * Extracts both basic and extended identity fields from event content.
+ * Extracts both basic and extended identity fields from event content when possible.
+ * On parse failure, returns minimal binding info.
  *
  * @param event Binding event
- * @returns BindingInfo, or null if content cannot be parsed
+ * @returns BindingInfo with parsed fields when possible, or minimal info if content cannot be parsed
  */
 export function parseBindingInfo(event: Event): BindingInfo {
   try {

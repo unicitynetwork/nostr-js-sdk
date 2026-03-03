@@ -40,6 +40,8 @@ async function createSignedBinding(
 
 /**
  * Stub the client's subscribe method to deliver given events then EOSE.
+ * Deliberately filter-unaware: these tests exercise ordering/resolution logic,
+ * not filter construction. Filter correctness is tested separately in nametag.test.ts.
  */
 function stubSubscribe(client: NostrClient, events: Event[]): void {
   vi.spyOn(client, 'subscribe').mockImplementation(

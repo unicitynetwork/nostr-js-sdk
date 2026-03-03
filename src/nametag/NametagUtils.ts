@@ -20,6 +20,35 @@ async function getWebCrypto(): Promise<Crypto> {
   return nodeCrypto.webcrypto as unknown as Crypto;
 }
 
+/**
+ * Base64 encode (works in both Node.js and browser).
+ */
+function toBase64(bytes: Uint8Array): string {
+  if (typeof Buffer !== 'undefined') {
+    return Buffer.from(bytes).toString('base64');
+  }
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+/**
+ * Base64 decode (works in both Node.js and browser).
+ */
+function fromBase64(base64: string): Uint8Array {
+  if (typeof Buffer !== 'undefined') {
+    return new Uint8Array(Buffer.from(base64, 'base64'));
+  }
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
 /** Salt prefix for nametag hashing */
 const NAMETAG_SALT = 'unicity:nametag:';
 
@@ -298,7 +327,7 @@ export async function encryptNametag(nametag: string, privateKeyHex: string): Pr
   combined.set(iv, 0);
   combined.set(new Uint8Array(encrypted), iv.length);
 
-  return btoa(String.fromCharCode(...combined));
+  return toBase64(combined);
 }
 
 /**
@@ -311,7 +340,7 @@ export async function decryptNametag(encryptedBase64: string, privateKeyHex: str
   try {
     const webCrypto = await getWebCrypto();
     const key = deriveNametagEncryptionKey(privateKeyHex);
-    const combined = Uint8Array.from(atob(encryptedBase64), c => c.charCodeAt(0));
+    const combined = fromBase64(encryptedBase64);
 
     const iv = combined.slice(0, 12);
     const ciphertext = combined.slice(12);

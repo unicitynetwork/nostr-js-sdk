@@ -347,9 +347,11 @@ Tags enable indexed lookups:
 
 All query methods use **first-seen-wins across authors, latest-wins for same author**:
 
-1. **First-seen-wins across authors** — if multiple pubkeys claim the same nametag, the author who published the earliest `created_at` event wins. This prevents hijacking.
+1. **First-seen-wins across authors** — if multiple pubkeys claim the same nametag, the author who published the earliest `created_at` event wins. Ties are broken deterministically by lexicographic pubkey comparison. This prevents hijacking.
 
 2. **Latest-wins for same author** — if the rightful owner publishes multiple events (e.g., initial binding without nametag, then updated binding with nametag), the most recent event is returned. This ensures queries return the most complete data.
+
+3. **Signature verification** — events with invalid signatures are silently skipped, preventing malicious relays from injecting forged events.
 
 This two-level strategy is critical for the wallet workflow where a binding may be published first without a nametag, then updated later when the user registers one. Both events share address `#t` tags, so address-based lookups see both — the strategy ensures the latest (most complete) event from the original author is returned.
 

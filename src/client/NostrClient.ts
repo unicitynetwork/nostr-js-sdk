@@ -999,14 +999,16 @@ export class NostrClient {
     extractResult: (event: Event) => T,
   ): Promise<T | null> {
     return new Promise((resolve) => {
+      let subscriptionId = '';
+
       const timeoutId = setTimeout(() => {
-        this.unsubscribe(subscriptionId);
+        if (subscriptionId) this.unsubscribe(subscriptionId);
         resolve(null);
       }, this.queryTimeoutMs);
 
       const authors = new Map<string, { firstSeen: number; latestEvent: Event }>();
 
-      const subscriptionId = this.subscribe(filter, {
+      subscriptionId = this.subscribe(filter, {
         onEvent: (event) => {
           // Verify signature to prevent relay injection of forged events (#4)
           if (!event.verify()) return;
