@@ -1,0 +1,285 @@
+/**
+ * Tests for nametag hijacking prevention.
+ *
+ * Verifies the two core anti-hijacking mechanisms:
+ * 1. First-seen-wins: queryPubkeyByNametag returns the earliest binding author
+ * 2. Conflict detection: publishNametagBinding rejects if nametag is claimed by another pubkey
+ *
+ * These are the critical paths that prevent a malicious actor from overwriting
+ * another user's nametag binding on Nostr relays.
+ */
+
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { NostrClient } from '../../src/client/NostrClient.js';
+import { NostrKeyManager } from '../../src/NostrKeyManager.js';
+import { createBindingEvent } from '../../src/nametag/NametagBinding.js';
+import type { Event } from '../../src/protocol/Event.js';
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+/**
+ * Create a signed binding event for a nametag from a given key manager.
+ */
+async function createSignedBinding(
+  km: NostrKeyManager,
+  nametag: string,
+  createdAtOverride?: number,
+): Promise<Event> {
+  const event = await createBindingEvent(km, nametag, km.getPublicKeyHex());
+  // Override created_at for testing ordering
+  if (createdAtOverride !== undefined) {
+    (event as unknown as { created_at: number }).created_at = createdAtOverride;
+  }
+  return event;
+}
+
+/**
+ * Stub the client's subscribe method to deliver given events then EOSE.
+ */
+function stubSubscribe(client: NostrClient, events: Event[]): void {
+  vi.spyOn(client, 'subscribe').mockImplementation(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (...args: any[]) => {
+      const subId = 'test-sub-' + Math.random().toString(36).slice(2, 6);
+      // Last arg is always the listener
+      const listener = args[args.length - 1];
+      setTimeout(() => {
+        for (const event of events) {
+          listener.onEvent?.(event);
+        }
+        listener.onEndOfStoredEvents?.();
+      }, 0);
+      return subId;
+    },
+  );
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+describe('Nametag hijacking prevention', () => {
+  let alice: NostrKeyManager;
+  let bob: NostrKeyManager;
+  let client: NostrClient;
+
+  beforeEach(() => {
+    alice = NostrKeyManager.generate();
+    bob = NostrKeyManager.generate();
+    client = new NostrClient(alice, { queryTimeoutMs: 1000 });
+  });
+
+  afterEach(() => {
+    client.disconnect();
+    vi.restoreAllMocks();
+  });
+
+  // ===========================================================================
+  // First-seen-wins: queryPubkeyByNametag
+  // ===========================================================================
+
+  describe('queryPubkeyByNametag (first-seen-wins)', () => {
+    it('should return the pubkey of the earliest binding event', async () => {
+      // Alice registered first (timestamp 1000), Bob tried later (timestamp 2000)
+      const aliceEvent = await createSignedBinding(alice, 'coolname', 1000);
+      const bobEvent = await createSignedBinding(bob, 'coolname', 2000);
+
+      // Relay returns both events (order doesn't matter — code picks earliest)
+      stubSubscribe(client, [bobEvent, aliceEvent]);
+
+      const owner = await client.queryPubkeyByNametag('coolname');
+      expect(owner).toBe(alice.getPublicKeyHex());
+    });
+
+    it('should still pick earliest even when attacker event arrives first', async () => {
+      // Attacker (Bob) published later but relay delivers his event first
+      const aliceEvent = await createSignedBinding(alice, 'target', 1000);
+      const bobEvent = await createSignedBinding(bob, 'target', 2000);
+
+      // Bob's event arrives first in the subscription stream
+      stubSubscribe(client, [bobEvent, aliceEvent]);
+
+      const owner = await client.queryPubkeyByNametag('target');
+      // Alice's event has earlier timestamp → she wins
+      expect(owner).toBe(alice.getPublicKeyHex());
+      expect(owner).not.toBe(bob.getPublicKeyHex());
+    });
+
+    it('should return null when no binding exists', async () => {
+      stubSubscribe(client, []);
+
+      const owner = await client.queryPubkeyByNametag('unclaimed');
+      expect(owner).toBeNull();
+    });
+
+    it('should return the only pubkey when single binding exists', async () => {
+      const aliceEvent = await createSignedBinding(alice, 'solo', 1000);
+      stubSubscribe(client, [aliceEvent]);
+
+      const owner = await client.queryPubkeyByNametag('solo');
+      expect(owner).toBe(alice.getPublicKeyHex());
+    });
+
+    it('should handle multiple hijack attempts and still return original owner', async () => {
+      // Alice is the original owner (earliest)
+      const aliceEvent = await createSignedBinding(alice, 'popular', 1000);
+
+      // Multiple attackers try to claim the same nametag
+      const attacker1 = NostrKeyManager.generate();
+      const attacker2 = NostrKeyManager.generate();
+      const attack1Event = await createSignedBinding(attacker1, 'popular', 1500);
+      const attack2Event = await createSignedBinding(attacker2, 'popular', 2000);
+
+      // Relay returns all events in arbitrary order
+      stubSubscribe(client, [attack2Event, attack1Event, aliceEvent]);
+
+      const owner = await client.queryPubkeyByNametag('popular');
+      expect(owner).toBe(alice.getPublicKeyHex());
+    });
+  });
+
+  // ===========================================================================
+  // First-seen-wins: queryBindingByNametag
+  // ===========================================================================
+
+  describe('queryBindingByNametag (first-seen-wins with extended info)', () => {
+    it('should return BindingInfo from the earliest event', async () => {
+      const aliceEvent = await createSignedBinding(alice, 'richinfo', 1000);
+      const bobEvent = await createSignedBinding(bob, 'richinfo', 2000);
+
+      stubSubscribe(client, [bobEvent, aliceEvent]);
+
+      const info = await client.queryBindingByNametag('richinfo');
+      expect(info).not.toBeNull();
+      expect(info!.transportPubkey).toBe(alice.getPublicKeyHex());
+      expect(info!.timestamp).toBe(1000 * 1000); // converted to ms
+    });
+
+    it('should return null when no binding exists', async () => {
+      stubSubscribe(client, []);
+
+      const info = await client.queryBindingByNametag('ghost');
+      expect(info).toBeNull();
+    });
+  });
+
+  // ===========================================================================
+  // Conflict detection: publishNametagBinding
+  // ===========================================================================
+
+  describe('publishNametagBinding (conflict detection)', () => {
+    it('should throw when nametag is already claimed by another pubkey', async () => {
+      // Alice already owns the nametag on the relay
+      const aliceEvent = await createSignedBinding(alice, 'taken', 1000);
+
+      // Bob's client queries the relay → finds Alice's binding
+      const bobClient = new NostrClient(bob, { queryTimeoutMs: 1000 });
+      stubSubscribe(bobClient, [aliceEvent]);
+
+      // Bob tries to publish → should throw
+      await expect(
+        bobClient.publishNametagBinding('taken', bob.getPublicKeyHex()),
+      ).rejects.toThrow('already claimed');
+
+      bobClient.disconnect();
+    });
+
+    it('should succeed when nametag is unclaimed', async () => {
+      // No events on relay
+      stubSubscribe(client, []);
+      // Mock publishEvent to succeed
+      vi.spyOn(client, 'publishEvent').mockResolvedValue('event-id');
+
+      const result = await client.publishNametagBinding(
+        'fresh',
+        alice.getPublicKeyHex(),
+      );
+      expect(result).toBe(true);
+    });
+
+    it('should succeed when same pubkey re-publishes (update)', async () => {
+      // Alice already has a binding
+      const aliceEvent = await createSignedBinding(alice, 'mine', 1000);
+      stubSubscribe(client, [aliceEvent]);
+      vi.spyOn(client, 'publishEvent').mockResolvedValue('event-id');
+
+      // Alice re-publishes (e.g., updating address info) → should succeed
+      const result = await client.publishNametagBinding(
+        'mine',
+        alice.getPublicKeyHex(),
+      );
+      expect(result).toBe(true);
+    });
+
+    it('should pass identity params through to the binding event', async () => {
+      stubSubscribe(client, []);
+      const publishSpy = vi.spyOn(client, 'publishEvent').mockResolvedValue('event-id');
+
+      await client.publishNametagBinding(
+        'withident',
+        alice.getPublicKeyHex(),
+        {
+          publicKey: '02' + 'a'.repeat(64),
+          l1Address: 'alpha1test',
+          directAddress: 'DIRECT://test',
+        },
+      );
+
+      // Verify the published event contains identity fields in content
+      expect(publishSpy).toHaveBeenCalledTimes(1);
+      const publishedEvent = publishSpy.mock.calls[0][0];
+      const content = JSON.parse((publishedEvent as unknown as { content: string }).content);
+      expect(content.public_key).toBe('02' + 'a'.repeat(64));
+      expect(content.l1_address).toBe('alpha1test');
+      expect(content.direct_address).toBe('DIRECT://test');
+    });
+  });
+
+  // ===========================================================================
+  // End-to-end hijacking scenario
+  // ===========================================================================
+
+  describe('end-to-end hijacking scenario', () => {
+    it('Alice registers, Bob tries to hijack, resolution still returns Alice', async () => {
+      // Step 1: Alice publishes her binding (timestamp 1000)
+      const aliceEvent = await createSignedBinding(alice, 'alice', 1000);
+
+      // Step 2: Bob (attacker) publishes a binding for the same nametag (timestamp 2000)
+      const bobEvent = await createSignedBinding(bob, 'alice', 2000);
+
+      // Step 3: Both events exist on the relay
+      // Any client resolving "alice" should get Alice's pubkey (earliest)
+      const resolver = new NostrClient(NostrKeyManager.generate(), { queryTimeoutMs: 1000 });
+      stubSubscribe(resolver, [bobEvent, aliceEvent]);
+
+      const resolvedPubkey = await resolver.queryPubkeyByNametag('alice');
+      expect(resolvedPubkey).toBe(alice.getPublicKeyHex());
+      expect(resolvedPubkey).not.toBe(bob.getPublicKeyHex());
+
+      resolver.disconnect();
+    });
+
+    it('Bob cannot publish if Alice already claimed the nametag', async () => {
+      const aliceEvent = await createSignedBinding(alice, 'protected', 1000);
+
+      // Bob's client sees Alice's existing binding
+      const bobClient = new NostrClient(bob, { queryTimeoutMs: 1000 });
+      stubSubscribe(bobClient, [aliceEvent]);
+
+      // Bob's publish attempt is rejected
+      await expect(
+        bobClient.publishNametagBinding('protected', bob.getPublicKeyHex()),
+      ).rejects.toThrow('already claimed');
+
+      // Meanwhile, resolution still returns Alice
+      vi.restoreAllMocks();
+      stubSubscribe(bobClient, [aliceEvent]);
+      const owner = await bobClient.queryPubkeyByNametag('protected');
+      expect(owner).toBe(alice.getPublicKeyHex());
+
+      bobClient.disconnect();
+    });
+  });
+});
