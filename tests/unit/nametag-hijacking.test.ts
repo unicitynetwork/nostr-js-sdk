@@ -166,6 +166,92 @@ describe('Nametag hijacking prevention', () => {
   });
 
   // ===========================================================================
+  // Same-author latest-wins: updated binding returned over stale one
+  // ===========================================================================
+
+  describe('same-author latest-wins', () => {
+    it('queryBindingByNametag should return latest event from the rightful owner', async () => {
+      // Alice publishes an initial binding (timestamp 1000), then updates it (timestamp 2000)
+      const aliceOld = await createSignedBinding(alice, 'evolving', 1000);
+      const aliceNew = await createSignedBinding(alice, 'evolving', 2000);
+      // Override content to distinguish old vs new
+      (aliceNew as unknown as { content: string }).content = JSON.stringify({
+        nametag_hash: 'hash',
+        address: alice.getPublicKeyHex(),
+        verified: Date.now(),
+        nametag: 'evolving',
+        public_key: '02' + 'b'.repeat(64),
+        l1_address: 'alpha1updated',
+      });
+
+      // Relay returns both (old first)
+      stubSubscribe(client, [aliceOld, aliceNew]);
+
+      const info = await client.queryBindingByNametag('evolving');
+      expect(info).not.toBeNull();
+      expect(info!.transportPubkey).toBe(alice.getPublicKeyHex());
+      // Should return the LATEST event's data (timestamp 2000)
+      expect(info!.timestamp).toBe(2000 * 1000);
+      expect(info!.l1Address).toBe('alpha1updated');
+    });
+
+    it('queryBindingByNametag should return latest same-author even when attacker also present', async () => {
+      // Alice: old binding at 1000, updated at 3000
+      const aliceOld = await createSignedBinding(alice, 'contested', 1000);
+      const aliceNew = await createSignedBinding(alice, 'contested', 3000);
+      // Bob tries to hijack at 2000 (between Alice's two events)
+      const bobEvent = await createSignedBinding(bob, 'contested', 2000);
+
+      stubSubscribe(client, [bobEvent, aliceNew, aliceOld]);
+
+      const info = await client.queryBindingByNametag('contested');
+      expect(info).not.toBeNull();
+      // Alice wins (earliest first-seen = 1000)
+      expect(info!.transportPubkey).toBe(alice.getPublicKeyHex());
+      // But we get Alice's LATEST event (timestamp 3000)
+      expect(info!.timestamp).toBe(3000 * 1000);
+    });
+
+    it('queryBindingByAddress should return latest event from same author', async () => {
+      // Simulate: wallet created without nametag (timestamp 1000), then nametag added (timestamp 2000)
+      // Both events share the same address tag
+      const bareEvent = await createSignedBinding(alice, 'lookup', 1000);
+      const fullEvent = await createSignedBinding(alice, 'lookup', 2000);
+      (fullEvent as unknown as { content: string }).content = JSON.stringify({
+        nametag_hash: 'hash',
+        address: alice.getPublicKeyHex(),
+        verified: Date.now(),
+        nametag: 'lookup',
+        public_key: '02' + 'c'.repeat(64),
+        l1_address: 'alpha1full',
+        direct_address: 'DIRECT://full',
+      });
+
+      stubSubscribe(client, [bareEvent, fullEvent]);
+
+      const info = await client.queryBindingByAddress(alice.getPublicKeyHex());
+      expect(info).not.toBeNull();
+      // Should return the LATEST (most complete) event
+      expect(info!.timestamp).toBe(2000 * 1000);
+      expect(info!.nametag).toBe('lookup');
+      expect(info!.l1Address).toBe('alpha1full');
+    });
+
+    it('queryPubkeyByNametag should still pick earliest author even with multiple same-author events', async () => {
+      // Alice has two events (1000, 3000), Bob has one (2000)
+      const alice1 = await createSignedBinding(alice, 'multiauth', 1000);
+      const alice2 = await createSignedBinding(alice, 'multiauth', 3000);
+      const bobEvent = await createSignedBinding(bob, 'multiauth', 2000);
+
+      stubSubscribe(client, [alice2, bobEvent, alice1]);
+
+      const owner = await client.queryPubkeyByNametag('multiauth');
+      // Alice first appeared at 1000, Bob at 2000 → Alice wins
+      expect(owner).toBe(alice.getPublicKeyHex());
+    });
+  });
+
+  // ===========================================================================
   // Conflict detection: publishNametagBinding
   // ===========================================================================
 

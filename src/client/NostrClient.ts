@@ -988,21 +988,29 @@ export class NostrClient {
         resolve(null);
       }, this.queryTimeoutMs);
 
-      let result: string | null = null;
-      let earliestCreatedAt = Infinity;
+      // Per-author tracking: first-seen-wins across authors
+      const authors = new Map<string, number>(); // pubkey → earliest created_at
 
       const subscriptionId = this.subscribe(filter, {
         onEvent: (event) => {
-          // First-seen wins: keep the earliest binding to prevent hijacking
-          if (event.created_at < earliestCreatedAt) {
-            earliestCreatedAt = event.created_at;
-            result = event.pubkey;
+          const existing = authors.get(event.pubkey);
+          if (existing === undefined || event.created_at < existing) {
+            authors.set(event.pubkey, event.created_at);
           }
         },
         onEndOfStoredEvents: () => {
           clearTimeout(timeoutId);
           this.unsubscribe(subscriptionId);
-          resolve(result);
+          // Pick author with earliest first appearance
+          let winner: string | null = null;
+          let earliest = Infinity;
+          for (const [pubkey, firstSeen] of authors) {
+            if (firstSeen < earliest) {
+              earliest = firstSeen;
+              winner = pubkey;
+            }
+          }
+          resolve(winner);
         },
       });
     });
@@ -1024,21 +1032,38 @@ export class NostrClient {
         resolve(null);
       }, this.queryTimeoutMs);
 
-      let result: BindingInfo | null = null;
-      let earliestCreatedAt = Infinity;
+      // Per-author tracking: first-seen-wins across authors, latest-wins for same author.
+      // This prevents hijacking (attacker's later event loses to original author's earlier one)
+      // while ensuring the most complete binding data is returned for the rightful owner.
+      const authors = new Map<string, { firstSeen: number; latestEvent: Event }>();
 
       const subscriptionId = this.subscribe(filter, {
         onEvent: (event) => {
-          // First-seen wins: keep the earliest binding to prevent hijacking
-          if (event.created_at < earliestCreatedAt) {
-            earliestCreatedAt = event.created_at;
-            result = parseBindingInfo(event);
+          const existing = authors.get(event.pubkey);
+          if (!existing) {
+            authors.set(event.pubkey, { firstSeen: event.created_at, latestEvent: event });
+          } else {
+            if (event.created_at < existing.firstSeen) {
+              existing.firstSeen = event.created_at;
+            }
+            if (event.created_at > existing.latestEvent.created_at) {
+              existing.latestEvent = event;
+            }
           }
         },
         onEndOfStoredEvents: () => {
           clearTimeout(timeoutId);
           this.unsubscribe(subscriptionId);
-          resolve(result);
+          // Pick author with earliest first appearance, return their latest event
+          let winner: Event | null = null;
+          let earliest = Infinity;
+          for (const [, entry] of authors) {
+            if (entry.firstSeen < earliest) {
+              earliest = entry.firstSeen;
+              winner = entry.latestEvent;
+            }
+          }
+          resolve(winner ? parseBindingInfo(winner) : null);
         },
       });
     });
@@ -1060,20 +1085,37 @@ export class NostrClient {
         resolve(null);
       }, this.queryTimeoutMs);
 
-      let result: BindingInfo | null = null;
-      let earliestCreatedAt = Infinity;
+      // Same strategy as queryBindingByNametag: first-seen-wins across authors,
+      // latest-wins for same author — returns the most complete binding from the
+      // rightful owner (the author who first published a binding for this address).
+      const authors = new Map<string, { firstSeen: number; latestEvent: Event }>();
 
       const subscriptionId = this.subscribe(filter, {
         onEvent: (event) => {
-          if (event.created_at < earliestCreatedAt) {
-            earliestCreatedAt = event.created_at;
-            result = parseBindingInfo(event);
+          const existing = authors.get(event.pubkey);
+          if (!existing) {
+            authors.set(event.pubkey, { firstSeen: event.created_at, latestEvent: event });
+          } else {
+            if (event.created_at < existing.firstSeen) {
+              existing.firstSeen = event.created_at;
+            }
+            if (event.created_at > existing.latestEvent.created_at) {
+              existing.latestEvent = event;
+            }
           }
         },
         onEndOfStoredEvents: () => {
           clearTimeout(timeoutId);
           this.unsubscribe(subscriptionId);
-          resolve(result);
+          let winner: Event | null = null;
+          let earliest = Infinity;
+          for (const [, entry] of authors) {
+            if (entry.firstSeen < earliest) {
+              earliest = entry.firstSeen;
+              winner = entry.latestEvent;
+            }
+          }
+          resolve(winner ? parseBindingInfo(winner) : null);
         },
       });
     });
