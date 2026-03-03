@@ -19,6 +19,49 @@ interface BindingContent {
   nametag_hash: string;
   address: string;
   verified: number;
+  // Extended identity fields (optional for backward compat)
+  public_key?: string;
+  l1_address?: string;
+  direct_address?: string;
+  proxy_address?: string;
+  encrypted_nametag?: string;
+  nametag?: string;
+}
+
+/**
+ * Extended identity parameters for richer binding events.
+ * All fields are optional — when provided, they are included in the
+ * event content and indexed via 't' tags for reverse lookup.
+ */
+export interface IdentityBindingParams {
+  /** 33-byte compressed secp256k1 public key */
+  publicKey?: string;
+  /** L1 bech32 address (e.g., alpha1...) */
+  l1Address?: string;
+  /** Direct address identifier */
+  directAddress?: string;
+  /** Proxy address (derived from nametag) */
+  proxyAddress?: string;
+}
+
+/**
+ * Parsed binding info returned by query methods.
+ */
+export interface BindingInfo {
+  /** Event author's 32-byte Nostr public key (hex) */
+  transportPubkey: string;
+  /** 33-byte compressed secp256k1 public key (from content) */
+  publicKey?: string;
+  /** L1 bech32 address (from content) */
+  l1Address?: string;
+  /** Direct address (from content) */
+  directAddress?: string;
+  /** Proxy address (from content) */
+  proxyAddress?: string;
+  /** Plaintext nametag (from content, if present) */
+  nametag?: string;
+  /** Event timestamp in milliseconds */
+  timestamp: number;
 }
 
 /**
@@ -37,13 +80,15 @@ interface BindingContent {
  * @param nametagId Nametag identifier (phone number or username)
  * @param unicityAddress Unicity blockchain address
  * @param defaultCountry Default country code for phone normalization
+ * @param identity Optional extended identity parameters
  * @returns Signed event
  */
 export async function createBindingEvent(
   keyManager: NostrKeyManager,
   nametagId: string,
   unicityAddress: string,
-  defaultCountry: string = DEFAULT_COUNTRY
+  defaultCountry: string = DEFAULT_COUNTRY,
+  identity?: IdentityBindingParams,
 ): Promise<Event> {
   if (!NametagUtils.isValidNametag(nametagId, defaultCountry)) {
     throw new Error(`Invalid nametag: "${nametagId}". Must be 3-20 chars [a-z0-9_-] or a valid phone number.`);
@@ -57,14 +102,45 @@ export async function createBindingEvent(
     verified: Date.now(),
   };
 
+  const tags: string[][] = [
+    ['d', hashedNametag],
+    ['nametag', hashedNametag],
+    ['t', hashedNametag],
+    ['address', unicityAddress],
+  ];
+
+  // Add extended identity fields when provided
+  if (identity) {
+    const encryptedNametag = await NametagUtils.encryptNametag(
+      nametagId,
+      keyManager.getPrivateKeyHex(),
+    );
+    content.encrypted_nametag = encryptedNametag;
+    content.nametag = nametagId;
+
+    if (identity.publicKey) {
+      content.public_key = identity.publicKey;
+      tags.push(['t', NametagUtils.hashAddressForTag(identity.publicKey)]);
+      tags.push(['pubkey', identity.publicKey]);
+    }
+    if (identity.l1Address) {
+      content.l1_address = identity.l1Address;
+      tags.push(['t', NametagUtils.hashAddressForTag(identity.l1Address)]);
+      tags.push(['l1', identity.l1Address]);
+    }
+    if (identity.directAddress) {
+      content.direct_address = identity.directAddress;
+      tags.push(['t', NametagUtils.hashAddressForTag(identity.directAddress)]);
+    }
+    if (identity.proxyAddress) {
+      content.proxy_address = identity.proxyAddress;
+      tags.push(['t', NametagUtils.hashAddressForTag(identity.proxyAddress)]);
+    }
+  }
+
   const event = Event.create(keyManager, {
     kind: EventKinds.APP_DATA,
-    tags: [
-      ['d', hashedNametag],
-      ['nametag', hashedNametag],
-      ['t', hashedNametag],
-      ['address', unicityAddress],
-    ],
+    tags,
     content: JSON.stringify(content),
   });
 
@@ -92,6 +168,22 @@ export function createNametagToPubkeyFilter(
 }
 
 /**
+ * Create a filter to query binding events by address hash.
+ * Query direction: address → binding event
+ *
+ * @param address Address string (DIRECT://..., alpha1..., PROXY://..., or chain pubkey)
+ * @returns Filter for nametag binding events
+ */
+export function createAddressToBindingFilter(address: string): Filter {
+  const hashedAddress = NametagUtils.hashAddressForTag(address);
+
+  return Filter.builder()
+    .kinds(EventKinds.APP_DATA)
+    .tTags(hashedAddress)
+    .build();
+}
+
+/**
  * Create a filter to query nametags by pubkey.
  * Query direction: pubkey → nametags
  *
@@ -104,6 +196,33 @@ export function createPubkeyToNametagFilter(nostrPubkey: string): Filter {
     .authors(nostrPubkey)
     .limit(10)
     .build();
+}
+
+/**
+ * Parse binding info from an event.
+ * Extracts both basic and extended identity fields from event content.
+ *
+ * @param event Binding event
+ * @returns BindingInfo, or null if content cannot be parsed
+ */
+export function parseBindingInfo(event: Event): BindingInfo {
+  try {
+    const content = JSON.parse(event.content) as BindingContent;
+    return {
+      transportPubkey: event.pubkey,
+      publicKey: content.public_key,
+      l1Address: content.l1_address,
+      directAddress: content.direct_address,
+      proxyAddress: content.proxy_address,
+      nametag: content.nametag,
+      timestamp: event.created_at * 1000,
+    };
+  } catch {
+    return {
+      transportPubkey: event.pubkey,
+      timestamp: event.created_at * 1000,
+    };
+  }
 }
 
 /**

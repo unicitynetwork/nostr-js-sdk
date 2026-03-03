@@ -17,6 +17,13 @@ import {
 } from './WebSocketAdapter.js';
 import * as NIP17 from '../messaging/nip17.js';
 import type { PrivateMessage, PrivateMessageOptions } from '../messaging/types.js';
+import {
+  createBindingEvent,
+  createNametagToPubkeyFilter,
+  createAddressToBindingFilter,
+  parseBindingInfo,
+} from '../nametag/NametagBinding.js';
+import type { IdentityBindingParams, BindingInfo } from '../nametag/NametagBinding.js';
 
 /** Connection timeout in milliseconds */
 const CONNECTION_TIMEOUT_MS = 30000;
@@ -871,10 +878,9 @@ export class NostrClient {
    */
   async publishNametagBinding(
     nametagId: string,
-    unicityAddress: string
+    unicityAddress: string,
+    identity?: IdentityBindingParams,
   ): Promise<boolean> {
-    const NametagBinding = await import('../nametag/NametagBinding.js');
-
     // Check if already claimed by another pubkey
     const existingOwner = await this.queryPubkeyByNametag(nametagId);
     if (existingOwner && existingOwner !== this.keyManager.getPublicKeyHex()) {
@@ -883,10 +889,12 @@ export class NostrClient {
       );
     }
 
-    const event = await NametagBinding.createBindingEvent(
+    const event = await createBindingEvent(
       this.keyManager,
       nametagId,
-      unicityAddress
+      unicityAddress,
+      undefined,
+      identity,
     );
 
     try {
@@ -972,8 +980,7 @@ export class NostrClient {
    * @returns Promise that resolves with the public key hex, or null if not found
    */
   async queryPubkeyByNametag(nametagId: string): Promise<string | null> {
-    const NametagBinding = await import('../nametag/NametagBinding.js');
-    const filter = NametagBinding.createNametagToPubkeyFilter(nametagId);
+    const filter = createNametagToPubkeyFilter(nametagId);
 
     return new Promise((resolve) => {
       const timeoutId = setTimeout(() => {
@@ -990,6 +997,77 @@ export class NostrClient {
           if (event.created_at < earliestCreatedAt) {
             earliestCreatedAt = event.created_at;
             result = event.pubkey;
+          }
+        },
+        onEndOfStoredEvents: () => {
+          clearTimeout(timeoutId);
+          this.unsubscribe(subscriptionId);
+          resolve(result);
+        },
+      });
+    });
+  }
+
+  /**
+   * Query for full binding info by nametag.
+   * Returns extended identity fields (chain pubkey, addresses, etc.) when available.
+   * Uses first-seen-wins to prevent hijacking.
+   * @param nametagId Nametag identifier
+   * @returns Promise that resolves with BindingInfo, or null if not found
+   */
+  async queryBindingByNametag(nametagId: string): Promise<BindingInfo | null> {
+    const filter = createNametagToPubkeyFilter(nametagId);
+
+    return new Promise((resolve) => {
+      const timeoutId = setTimeout(() => {
+        this.unsubscribe(subscriptionId);
+        resolve(null);
+      }, this.queryTimeoutMs);
+
+      let result: BindingInfo | null = null;
+      let earliestCreatedAt = Infinity;
+
+      const subscriptionId = this.subscribe(filter, {
+        onEvent: (event) => {
+          // First-seen wins: keep the earliest binding to prevent hijacking
+          if (event.created_at < earliestCreatedAt) {
+            earliestCreatedAt = event.created_at;
+            result = parseBindingInfo(event);
+          }
+        },
+        onEndOfStoredEvents: () => {
+          clearTimeout(timeoutId);
+          this.unsubscribe(subscriptionId);
+          resolve(result);
+        },
+      });
+    });
+  }
+
+  /**
+   * Query for binding info by address (reverse lookup).
+   * Supports DIRECT://, PROXY://, alpha1..., or chain pubkey lookups.
+   * Uses first-seen-wins to prevent hijacking.
+   * @param address Address string
+   * @returns Promise that resolves with BindingInfo, or null if not found
+   */
+  async queryBindingByAddress(address: string): Promise<BindingInfo | null> {
+    const filter = createAddressToBindingFilter(address);
+
+    return new Promise((resolve) => {
+      const timeoutId = setTimeout(() => {
+        this.unsubscribe(subscriptionId);
+        resolve(null);
+      }, this.queryTimeoutMs);
+
+      let result: BindingInfo | null = null;
+      let earliestCreatedAt = Infinity;
+
+      const subscriptionId = this.subscribe(filter, {
+        onEvent: (event) => {
+          if (event.created_at < earliestCreatedAt) {
+            earliestCreatedAt = event.created_at;
+            result = parseBindingInfo(event);
           }
         },
         onEndOfStoredEvents: () => {
