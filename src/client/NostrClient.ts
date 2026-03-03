@@ -975,150 +975,114 @@ export class NostrClient {
   }
 
   /**
-   * Query for a public key by nametag.
-   * @param nametagId Nametag identifier
-   * @returns Promise that resolves with the public key hex, or null if not found
+   * Query binding events with first-seen-wins anti-hijacking resolution.
+   *
+   * Strategy: first-seen-wins across authors, latest-wins for same author.
+   * - Across authors: the pubkey that first published wins (earliest created_at)
+   * - Same author: the most recent event is used (latest created_at = most complete data)
+   * - Tie-breaking: deterministic by lexicographic pubkey comparison (lowest wins)
+   *
+   * Events with invalid signatures are silently skipped to prevent relay injection attacks.
+   *
+   * Known limitations:
+   * - Timestamps are self-reported (NIP-01). An attacker can set created_at to 0.
+   *   Chain-anchored proof of registration time is the only reliable defense.
+   * - TOCTOU: between conflict check and publish, another user can claim the same nametag.
+   *   This is inherent to Nostr's eventually-consistent relay model.
+   *
+   * @param filter Subscription filter
+   * @param extractResult Callback to extract the desired result from the winning event
+   * @returns Promise resolving to the extracted result, or null
    */
-  async queryPubkeyByNametag(nametagId: string): Promise<string | null> {
-    const filter = createNametagToPubkeyFilter(nametagId);
-
+  private queryWithFirstSeenWins<T>(
+    filter: Filter,
+    extractResult: (event: Event) => T,
+  ): Promise<T | null> {
     return new Promise((resolve) => {
       const timeoutId = setTimeout(() => {
         this.unsubscribe(subscriptionId);
         resolve(null);
       }, this.queryTimeoutMs);
 
-      // Per-author tracking: first-seen-wins across authors
-      const authors = new Map<string, number>(); // pubkey → earliest created_at
+      const authors = new Map<string, { firstSeen: number; latestEvent: Event }>();
 
       const subscriptionId = this.subscribe(filter, {
         onEvent: (event) => {
+          // Verify signature to prevent relay injection of forged events (#4)
+          if (!event.verify()) return;
+
           const existing = authors.get(event.pubkey);
-          if (existing === undefined || event.created_at < existing) {
-            authors.set(event.pubkey, event.created_at);
+          if (!existing) {
+            authors.set(event.pubkey, { firstSeen: event.created_at, latestEvent: event });
+          } else {
+            if (event.created_at < existing.firstSeen) {
+              existing.firstSeen = event.created_at;
+            }
+            if (event.created_at > existing.latestEvent.created_at) {
+              existing.latestEvent = event;
+            }
           }
         },
         onEndOfStoredEvents: () => {
           clearTimeout(timeoutId);
           this.unsubscribe(subscriptionId);
-          // Pick author with earliest first appearance
-          let winner: string | null = null;
-          let earliest = Infinity;
-          for (const [pubkey, firstSeen] of authors) {
-            if (firstSeen < earliest) {
-              earliest = firstSeen;
-              winner = pubkey;
+
+          let winnerEntry: { firstSeen: number; latestEvent: Event } | null = null;
+          let winnerPubkey = '';
+          for (const [pubkey, entry] of authors) {
+            if (!winnerEntry
+                || entry.firstSeen < winnerEntry.firstSeen
+                || (entry.firstSeen === winnerEntry.firstSeen && pubkey < winnerPubkey)) {
+              winnerEntry = entry;
+              winnerPubkey = pubkey;
             }
           }
-          resolve(winner);
+
+          resolve(winnerEntry ? extractResult(winnerEntry.latestEvent) : null);
         },
       });
     });
+  }
+
+  /**
+   * Query for a public key by nametag.
+   * Uses first-seen-wins anti-hijacking resolution.
+   * @param nametagId Nametag identifier
+   * @returns Promise that resolves with the public key hex, or null if not found
+   */
+  async queryPubkeyByNametag(nametagId: string): Promise<string | null> {
+    return this.queryWithFirstSeenWins(
+      createNametagToPubkeyFilter(nametagId),
+      (event) => event.pubkey,
+    );
   }
 
   /**
    * Query for full binding info by nametag.
    * Returns extended identity fields (chain pubkey, addresses, etc.) when available.
-   * Uses first-seen-wins to prevent hijacking.
+   * Uses first-seen-wins across authors, latest-wins for same author.
    * @param nametagId Nametag identifier
    * @returns Promise that resolves with BindingInfo, or null if not found
    */
   async queryBindingByNametag(nametagId: string): Promise<BindingInfo | null> {
-    const filter = createNametagToPubkeyFilter(nametagId);
-
-    return new Promise((resolve) => {
-      const timeoutId = setTimeout(() => {
-        this.unsubscribe(subscriptionId);
-        resolve(null);
-      }, this.queryTimeoutMs);
-
-      // Per-author tracking: first-seen-wins across authors, latest-wins for same author.
-      // This prevents hijacking (attacker's later event loses to original author's earlier one)
-      // while ensuring the most complete binding data is returned for the rightful owner.
-      const authors = new Map<string, { firstSeen: number; latestEvent: Event }>();
-
-      const subscriptionId = this.subscribe(filter, {
-        onEvent: (event) => {
-          const existing = authors.get(event.pubkey);
-          if (!existing) {
-            authors.set(event.pubkey, { firstSeen: event.created_at, latestEvent: event });
-          } else {
-            if (event.created_at < existing.firstSeen) {
-              existing.firstSeen = event.created_at;
-            }
-            if (event.created_at > existing.latestEvent.created_at) {
-              existing.latestEvent = event;
-            }
-          }
-        },
-        onEndOfStoredEvents: () => {
-          clearTimeout(timeoutId);
-          this.unsubscribe(subscriptionId);
-          // Pick author with earliest first appearance, return their latest event
-          let winner: Event | null = null;
-          let earliest = Infinity;
-          for (const [, entry] of authors) {
-            if (entry.firstSeen < earliest) {
-              earliest = entry.firstSeen;
-              winner = entry.latestEvent;
-            }
-          }
-          resolve(winner ? parseBindingInfo(winner) : null);
-        },
-      });
-    });
+    return this.queryWithFirstSeenWins(
+      createNametagToPubkeyFilter(nametagId),
+      parseBindingInfo,
+    );
   }
 
   /**
    * Query for binding info by address (reverse lookup).
    * Supports DIRECT://, PROXY://, alpha1..., or chain pubkey lookups.
-   * Uses first-seen-wins to prevent hijacking.
+   * Uses first-seen-wins across authors, latest-wins for same author.
    * @param address Address string
    * @returns Promise that resolves with BindingInfo, or null if not found
    */
   async queryBindingByAddress(address: string): Promise<BindingInfo | null> {
-    const filter = createAddressToBindingFilter(address);
-
-    return new Promise((resolve) => {
-      const timeoutId = setTimeout(() => {
-        this.unsubscribe(subscriptionId);
-        resolve(null);
-      }, this.queryTimeoutMs);
-
-      // Same strategy as queryBindingByNametag: first-seen-wins across authors,
-      // latest-wins for same author — returns the most complete binding from the
-      // rightful owner (the author who first published a binding for this address).
-      const authors = new Map<string, { firstSeen: number; latestEvent: Event }>();
-
-      const subscriptionId = this.subscribe(filter, {
-        onEvent: (event) => {
-          const existing = authors.get(event.pubkey);
-          if (!existing) {
-            authors.set(event.pubkey, { firstSeen: event.created_at, latestEvent: event });
-          } else {
-            if (event.created_at < existing.firstSeen) {
-              existing.firstSeen = event.created_at;
-            }
-            if (event.created_at > existing.latestEvent.created_at) {
-              existing.latestEvent = event;
-            }
-          }
-        },
-        onEndOfStoredEvents: () => {
-          clearTimeout(timeoutId);
-          this.unsubscribe(subscriptionId);
-          let winner: Event | null = null;
-          let earliest = Infinity;
-          for (const [, entry] of authors) {
-            if (entry.firstSeen < earliest) {
-              earliest = entry.firstSeen;
-              winner = entry.latestEvent;
-            }
-          }
-          resolve(winner ? parseBindingInfo(winner) : null);
-        },
-      });
-    });
+    return this.queryWithFirstSeenWins(
+      createAddressToBindingFilter(address),
+      parseBindingInfo,
+    );
   }
 
   /**

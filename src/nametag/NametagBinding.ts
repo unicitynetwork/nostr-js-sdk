@@ -9,8 +9,11 @@ import { Filter } from '../protocol/Filter.js';
 import * as EventKinds from '../protocol/EventKinds.js';
 import * as NametagUtils from './NametagUtils.js';
 
-/** Default country code for phone number normalization */
+/** Default country code for phone number normalization (shared with NametagUtils) */
 const DEFAULT_COUNTRY = 'US';
+
+/** Maximum number of events to buffer per query (bounds memory usage for contested nametags) */
+const QUERY_EVENT_LIMIT = 100;
 
 /**
  * Binding event content structure
@@ -99,7 +102,7 @@ export async function createBindingEvent(
   const content: BindingContent = {
     nametag_hash: hashedNametag,
     address: unicityAddress,
-    verified: Date.now(),
+    verified: Math.floor(Date.now() / 1000),
   };
 
   const tags: string[][] = [
@@ -116,6 +119,10 @@ export async function createBindingEvent(
       keyManager.getPrivateKeyHex(),
     );
     content.encrypted_nametag = encryptedNametag;
+    // Plaintext nametag is intentionally stored in content for public resolution.
+    // Nametags must be publicly resolvable (sending to @alice requires knowing her
+    // addresses). Tag hashing provides relay-level privacy (operators see hashes in
+    // indexed tags, not plaintext). The encrypted copy enables private key recovery.
     content.nametag = nametagId;
 
     if (identity.publicKey) {
@@ -164,6 +171,7 @@ export function createNametagToPubkeyFilter(
   return Filter.builder()
     .kinds(EventKinds.APP_DATA)
     .tTags(hashedNametag)
+    .limit(QUERY_EVENT_LIMIT)
     .build();
 }
 
@@ -180,6 +188,7 @@ export function createAddressToBindingFilter(address: string): Filter {
   return Filter.builder()
     .kinds(EventKinds.APP_DATA)
     .tTags(hashedAddress)
+    .limit(QUERY_EVENT_LIMIT)
     .build();
 }
 
@@ -217,7 +226,12 @@ export function parseBindingInfo(event: Event): BindingInfo {
       nametag: content.nametag,
       timestamp: event.created_at * 1000,
     };
-  } catch {
+  } catch (e) {
+    // Content is not valid JSON — return minimal info.
+    // This can happen with old-format events or data corruption.
+    if (typeof console !== 'undefined') {
+      console.warn(`[nostr-sdk] Failed to parse binding event content (event ${event.id?.slice(0, 8)}):`, e);
+    }
     return {
       transportPubkey: event.pubkey,
       timestamp: event.created_at * 1000,

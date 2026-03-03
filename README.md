@@ -280,7 +280,7 @@ Nametags are human-readable identifiers (`[a-z0-9_-]`, 3–20 chars) or phone nu
 // Publish nametag binding with identity info
 const success = await client.publishNametagBinding(
   'alice',                           // nametag
-  keyManager.getPublicKeyHex(),      // Nostr pubkey (address field)
+  keyManager.getPublicKeyHex(),      // Nostr pubkey (stored in event's address field)
   {                                  // optional extended identity
     publicKey: '02abc...',           // 33-byte compressed secp256k1 chain pubkey
     l1Address: 'alpha1...',          // L1 bech32 address

@@ -28,10 +28,13 @@ async function createSignedBinding(
   createdAtOverride?: number,
 ): Promise<Event> {
   const event = await createBindingEvent(km, nametag, km.getPublicKeyHex());
-  // Override created_at for testing ordering
+  // Override created_at for testing ordering.
+  // This invalidates the Schnorr signature, so we stub verify() to return true.
+  // These tests exercise ordering/resolution logic, not signature verification.
   if (createdAtOverride !== undefined) {
     (event as unknown as { created_at: number }).created_at = createdAtOverride;
   }
+  vi.spyOn(event, 'verify').mockReturnValue(true);
   return event;
 }
 
@@ -361,6 +364,7 @@ describe('Nametag hijacking prevention', () => {
 
       // Meanwhile, resolution still returns Alice
       vi.restoreAllMocks();
+      vi.spyOn(aliceEvent, 'verify').mockReturnValue(true);
       stubSubscribe(bobClient, [aliceEvent]);
       const owner = await bobClient.queryPubkeyByNametag('protected');
       expect(owner).toBe(alice.getPublicKeyHex());

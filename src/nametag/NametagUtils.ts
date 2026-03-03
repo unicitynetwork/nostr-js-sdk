@@ -8,6 +8,18 @@ import { hkdf } from '@noble/hashes/hkdf';
 import { bytesToHex } from '@noble/hashes/utils';
 import { parsePhoneNumber, isValidPhoneNumber, CountryCode } from 'libphonenumber-js';
 
+/**
+ * Get the Web Crypto API (works in both Node.js and browser).
+ */
+async function getWebCrypto(): Promise<Crypto> {
+  if (typeof globalThis.crypto?.subtle !== 'undefined') {
+    return globalThis.crypto;
+  }
+  // Node.js environment - import webcrypto
+  const nodeCrypto = await import('crypto');
+  return nodeCrypto.webcrypto as unknown as Crypto;
+}
+
 /** Salt prefix for nametag hashing */
 const NAMETAG_SALT = 'unicity:nametag:';
 
@@ -263,11 +275,12 @@ function hexToBytes(hex: string): Uint8Array {
  * @returns Base64-encoded encrypted data (IV + ciphertext + auth tag)
  */
 export async function encryptNametag(nametag: string, privateKeyHex: string): Promise<string> {
+  const webCrypto = await getWebCrypto();
   const key = deriveNametagEncryptionKey(privateKeyHex);
-  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const iv = webCrypto.getRandomValues(new Uint8Array(12));
   const data = new TextEncoder().encode(nametag);
 
-  const cryptoKey = await crypto.subtle.importKey(
+  const cryptoKey = await webCrypto.subtle.importKey(
     'raw',
     new Uint8Array(key).buffer as ArrayBuffer,
     { name: 'AES-GCM' },
@@ -275,7 +288,7 @@ export async function encryptNametag(nametag: string, privateKeyHex: string): Pr
     ['encrypt'],
   );
 
-  const encrypted = await crypto.subtle.encrypt(
+  const encrypted = await webCrypto.subtle.encrypt(
     { name: 'AES-GCM', iv: new Uint8Array(iv).buffer as ArrayBuffer },
     cryptoKey,
     new Uint8Array(data).buffer as ArrayBuffer,
@@ -296,13 +309,14 @@ export async function encryptNametag(nametag: string, privateKeyHex: string): Pr
  */
 export async function decryptNametag(encryptedBase64: string, privateKeyHex: string): Promise<string | null> {
   try {
+    const webCrypto = await getWebCrypto();
     const key = deriveNametagEncryptionKey(privateKeyHex);
     const combined = Uint8Array.from(atob(encryptedBase64), c => c.charCodeAt(0));
 
     const iv = combined.slice(0, 12);
     const ciphertext = combined.slice(12);
 
-    const cryptoKey = await crypto.subtle.importKey(
+    const cryptoKey = await webCrypto.subtle.importKey(
       'raw',
       new Uint8Array(key).buffer as ArrayBuffer,
       { name: 'AES-GCM' },
@@ -310,7 +324,7 @@ export async function decryptNametag(encryptedBase64: string, privateKeyHex: str
       ['decrypt'],
     );
 
-    const decrypted = await crypto.subtle.decrypt(
+    const decrypted = await webCrypto.subtle.decrypt(
       { name: 'AES-GCM', iv: new Uint8Array(iv).buffer as ArrayBuffer },
       cryptoKey,
       new Uint8Array(ciphertext).buffer as ArrayBuffer,
