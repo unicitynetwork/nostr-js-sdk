@@ -360,6 +360,64 @@ describe('NametagBinding', () => {
     });
   });
 
+  describe('createIdentityBindingEvent', () => {
+    it('should create event with identity-based d-tag', () => {
+      const event = NametagBinding.createIdentityBindingEvent(keyManager, {
+        publicKey: '02' + 'a'.repeat(64),
+        l1Address: 'alpha1test',
+        directAddress: 'DIRECT://test',
+      });
+
+      expect(event.kind).toBe(EventKinds.APP_DATA);
+      expect(event.verify()).toBe(true);
+
+      // d-tag should be hash of 'unicity:identity:' + nostrPubkey
+      const expectedDTag = NametagUtils.sha256Hex('unicity:identity:' + keyManager.getPublicKeyHex());
+      expect(event.getTagValue('d')).toBe(expectedDTag);
+    });
+
+    it('should include hashed t-tags for all addresses', () => {
+      const identity = {
+        publicKey: '02' + 'b'.repeat(64),
+        l1Address: 'alpha1xyz',
+        directAddress: 'DIRECT://xyz',
+      };
+
+      const event = NametagBinding.createIdentityBindingEvent(keyManager, identity);
+      const tTags = event.tags.filter((t: string[]) => t[0] === 't').map((t: string[]) => t[1]);
+
+      expect(tTags).toContain(NametagUtils.hashAddressForTag(identity.publicKey));
+      expect(tTags).toContain(NametagUtils.hashAddressForTag(identity.l1Address));
+      expect(tTags).toContain(NametagUtils.hashAddressForTag(identity.directAddress));
+    });
+
+    it('should include identity fields in content', () => {
+      const identity = {
+        publicKey: '02' + 'c'.repeat(64),
+        l1Address: 'alpha1abc',
+        directAddress: 'DIRECT://abc',
+      };
+
+      const event = NametagBinding.createIdentityBindingEvent(keyManager, identity);
+      const content = JSON.parse(event.content);
+
+      expect(content.public_key).toBe(identity.publicKey);
+      expect(content.l1_address).toBe(identity.l1Address);
+      expect(content.direct_address).toBe(identity.directAddress);
+    });
+
+    it('should NOT include nametag or encrypted_nametag', () => {
+      const event = NametagBinding.createIdentityBindingEvent(keyManager, {
+        publicKey: '02' + 'd'.repeat(64),
+      });
+      const content = JSON.parse(event.content);
+
+      expect(content.nametag).toBeUndefined();
+      expect(content.encrypted_nametag).toBeUndefined();
+      expect(content.nametag_hash).toBeUndefined();
+    });
+  });
+
   describe('createNametagToPubkeyFilter', () => {
     it('should create filter for nametag lookup', () => {
       const filter = NametagBinding.createNametagToPubkeyFilter('alice');

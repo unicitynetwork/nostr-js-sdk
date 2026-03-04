@@ -153,6 +153,51 @@ export async function createBindingEvent(
 }
 
 /**
+ * Create a base identity binding event (no nametag).
+ * Uses d-tag = SHA256('unicity:identity:' + nostrPubkey) so each wallet
+ * has exactly one identity binding event.
+ *
+ * @param keyManager Key manager with signing keys
+ * @param identity Identity parameters (publicKey, l1Address, directAddress)
+ * @returns Signed event
+ */
+export function createIdentityBindingEvent(
+  keyManager: NostrKeyManager,
+  identity: IdentityBindingParams,
+): Event {
+  const nostrPubkey = keyManager.getPublicKeyHex();
+  const dTag = NametagUtils.sha256Hex('unicity:identity:' + nostrPubkey);
+
+  const content: Record<string, string> = {};
+  const tags: string[][] = [
+    ['d', dTag],
+  ];
+
+  if (identity.publicKey) {
+    content.public_key = identity.publicKey;
+    tags.push(['t', NametagUtils.hashAddressForTag(identity.publicKey)]);
+  }
+  if (identity.l1Address) {
+    content.l1_address = identity.l1Address;
+    tags.push(['t', NametagUtils.hashAddressForTag(identity.l1Address)]);
+  }
+  if (identity.directAddress) {
+    content.direct_address = identity.directAddress;
+    tags.push(['t', NametagUtils.hashAddressForTag(identity.directAddress)]);
+  }
+  if (identity.proxyAddress) {
+    content.proxy_address = identity.proxyAddress;
+    tags.push(['t', NametagUtils.hashAddressForTag(identity.proxyAddress)]);
+  }
+
+  return Event.create(keyManager, {
+    kind: EventKinds.APP_DATA,
+    tags,
+    content: JSON.stringify(content),
+  });
+}
+
+/**
  * Create a filter to query pubkey by nametag.
  * Query direction: nametag → pubkey
  *

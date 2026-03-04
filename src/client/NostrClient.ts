@@ -21,6 +21,7 @@ import {
   createBindingEvent,
   createNametagToPubkeyFilter,
   createAddressToBindingFilter,
+  createIdentityBindingEvent,
   parseBindingInfo,
 } from '../nametag/NametagBinding.js';
 import type { IdentityBindingParams, BindingInfo } from '../nametag/NametagBinding.js';
@@ -896,6 +897,24 @@ export class NostrClient {
       undefined,
       identity,
     );
+
+    try {
+      await this.publishEvent(event);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Publish a base identity binding (no nametag).
+   * Uses d-tag = SHA256('unicity:identity:' + nostrPubkey) so each wallet
+   * has exactly one identity binding. Subsequent calls replace the previous event.
+   * @param identity Identity parameters (publicKey, l1Address, directAddress)
+   * @returns true if published successfully
+   */
+  async publishIdentityBinding(identity: IdentityBindingParams): Promise<boolean> {
+    const event = createIdentityBindingEvent(this.keyManager, identity);
 
     try {
       await this.publishEvent(event);
