@@ -272,26 +272,92 @@ PaymentRequestProtocol.parseAmount('1.5', 8); // BigInt(150_000_000) (8 decimals
 
 ### Nametag Bindings
 
-Nametags are lowercase alphanumeric strings (`[a-z0-9_-]`, 3–20 chars) or phone numbers (E.164 format). All input is normalized to lowercase before hashing. Use `isValidNametag(input)` to validate.
+Nametags are human-readable identifiers (`[a-z0-9_-]`, 3–20 chars) or phone numbers (E.164). All input is normalized to lowercase before hashing. Use `isValidNametag(input)` to validate.
+
+#### Publishing a Binding
 
 ```typescript
-import { NametagBinding, NametagUtils } from '@unicitylabs/nostr-sdk';
-
-// Hash a nametag (privacy-preserving)
-const hash = NametagUtils.hashNametag('+14155551234', 'US');
-
-// Create binding event
-const event = await NametagBinding.createBindingEvent(
-  keyManager,
-  '+14155551234',
-  'unicity_address_...'
+// Publish nametag binding with identity info
+const success = await client.publishNametagBinding(
+  'alice',                           // nametag
+  keyManager.getPublicKeyHex(),      // Nostr pubkey (stored in event's address field)
+  {                                  // optional extended identity
+    publicKey: '02abc...',           // 33-byte compressed secp256k1 chain pubkey
+    l1Address: 'alpha1...',          // L1 bech32 address
+    directAddress: 'DIRECT://...',   // L3 direct address
+    proxyAddress: 'PROXY://...',     // proxy address (derived from nametag)
+  },
 );
-
-await client.publishEvent(event);
-
-// Query pubkey by nametag
-const pubkey = await client.queryPubkeyByNametag('+14155551234');
+// Throws if nametag is already claimed by another pubkey.
+// Returns true on success, false if publish fails.
 ```
+
+#### Resolving a Nametag
+
+```typescript
+// Simple: get the owner pubkey
+const pubkey = await client.queryPubkeyByNametag('alice');
+
+// Extended: get full binding info (addresses, nametag, etc.)
+const info = await client.queryBindingByNametag('alice');
+// info: { transportPubkey, publicKey?, l1Address?, directAddress?, proxyAddress?, nametag?, timestamp }
+
+// Reverse lookup: address → binding
+const info = await client.queryBindingByAddress('alpha1abc...');
+```
+
+#### Event Format (kind 30078)
+
+Nametag bindings use NIP-78 parameterized replaceable events. Only the original author can update their own event (same pubkey + d-tag = replacement).
+
+**Nametag binding event** (with identity):
+
+```json
+{
+  "kind": 30078,
+  "pubkey": "<32-byte x-only Nostr pubkey>",
+  "tags": [
+    ["d", "<SHA256('unicity:nametag:' + normalizedNametag)>"],
+    ["nametag", "<hashed_nametag>"],
+    ["t", "<hashed_nametag>"],
+    ["address", "<nostr_pubkey>"],
+    ["t", "<SHA256('unicity:address:' + chainPubkey)>"],
+    ["pubkey", "<chainPubkey>"],
+    ["t", "<SHA256('unicity:address:' + l1Address)>"],
+    ["l1", "<l1Address>"],
+    ["t", "<SHA256('unicity:address:' + directAddress)>"],
+    ["t", "<SHA256('unicity:address:' + proxyAddress)>"]
+  ],
+  "content": "{\"nametag_hash\":\"...\",\"address\":\"...\",\"verified\":...,\"nametag\":\"alice\",\"encrypted_nametag\":\"...\",\"public_key\":\"02...\",\"l1_address\":\"alpha1...\",\"direct_address\":\"DIRECT://...\",\"proxy_address\":\"PROXY://...\"}"
+}
+```
+
+Key fields in content:
+- `nametag` — plaintext nametag (for display)
+- `encrypted_nametag` — AES-GCM encrypted nametag (for recovery by private key owner)
+- `public_key`, `l1_address`, `direct_address`, `proxy_address` — identity addresses
+- `nametag_hash` — `SHA256('unicity:nametag:' + normalizedNametag)`
+
+Tags enable indexed lookups:
+- `d` tag: makes event replaceable per nametag per author
+- `t` tags: hashed nametag + hashed addresses for relay search (privacy-preserving)
+- `pubkey`, `l1` tags: unhashed for backward-compatible lookups
+
+#### Anti-Hijacking Resolution Strategy
+
+All query methods use **first-seen-wins across authors, latest-wins for same author**:
+
+1. **First-seen-wins across authors** — if multiple pubkeys claim the same nametag, the author who published the earliest `created_at` event wins. Ties are broken deterministically by lexicographic pubkey comparison. This prevents hijacking.
+
+2. **Latest-wins for same author** — if the rightful owner publishes multiple events (e.g., initial binding without nametag, then updated binding with nametag), the most recent event is returned. This ensures queries return the most complete data.
+
+3. **Signature verification** — events with invalid signatures are silently skipped, preventing malicious relays from injecting forged events.
+
+This two-level strategy is critical for the wallet workflow where a binding may be published first without a nametag, then updated later when the user registers one. Both events share address `#t` tags, so address-based lookups see both — the strategy ensures the latest (most complete) event from the original author is returned.
+
+#### Privacy
+
+Nametags are never stored as plaintext in tags. All `t` and `d` tags use `SHA256('unicity:nametag:' + name)` or `SHA256('unicity:address:' + address)` hashes. The plaintext nametag is only in the event content (JSON), and an encrypted copy (`encrypted_nametag`) allows the private key owner to recover it.
 
 ## Token Transfer Format
 

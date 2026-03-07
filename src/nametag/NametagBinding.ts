@@ -9,7 +9,7 @@ import { Filter } from '../protocol/Filter.js';
 import * as EventKinds from '../protocol/EventKinds.js';
 import * as NametagUtils from './NametagUtils.js';
 
-/** Default country code for phone number normalization */
+/** Default country code for phone number normalization (shared with NametagUtils) */
 const DEFAULT_COUNTRY = 'US';
 
 /**
@@ -19,6 +19,49 @@ interface BindingContent {
   nametag_hash: string;
   address: string;
   verified: number;
+  // Extended identity fields (optional for backward compat)
+  public_key?: string;
+  l1_address?: string;
+  direct_address?: string;
+  proxy_address?: string;
+  encrypted_nametag?: string;
+  nametag?: string;
+}
+
+/**
+ * Extended identity parameters for richer binding events.
+ * All fields are optional — when provided, they are included in the
+ * event content and indexed via 't' tags for reverse lookup.
+ */
+export interface IdentityBindingParams {
+  /** 33-byte compressed secp256k1 public key */
+  publicKey?: string;
+  /** L1 bech32 address (e.g., alpha1...) */
+  l1Address?: string;
+  /** Direct address identifier */
+  directAddress?: string;
+  /** Proxy address (derived from nametag) */
+  proxyAddress?: string;
+}
+
+/**
+ * Parsed binding info returned by query methods.
+ */
+export interface BindingInfo {
+  /** Event author's 32-byte Nostr public key (hex) */
+  transportPubkey: string;
+  /** 33-byte compressed secp256k1 public key (from content) */
+  publicKey?: string;
+  /** L1 bech32 address (from content) */
+  l1Address?: string;
+  /** Direct address (from content) */
+  directAddress?: string;
+  /** Proxy address (from content) */
+  proxyAddress?: string;
+  /** Plaintext nametag (from content, if present) */
+  nametag?: string;
+  /** Event timestamp in milliseconds */
+  timestamp: number;
 }
 
 /**
@@ -37,34 +80,121 @@ interface BindingContent {
  * @param nametagId Nametag identifier (phone number or username)
  * @param unicityAddress Unicity blockchain address
  * @param defaultCountry Default country code for phone normalization
+ * @param identity Optional extended identity parameters
  * @returns Signed event
  */
 export async function createBindingEvent(
   keyManager: NostrKeyManager,
   nametagId: string,
   unicityAddress: string,
-  defaultCountry: string = DEFAULT_COUNTRY
+  defaultCountry: string = DEFAULT_COUNTRY,
+  identity?: IdentityBindingParams,
 ): Promise<Event> {
+  if (!NametagUtils.isValidNametag(nametagId, defaultCountry)) {
+    throw new Error(`Invalid nametag: "${nametagId}". Must be 3-20 chars [a-z0-9_-] or a valid phone number.`);
+  }
+
   const hashedNametag = NametagUtils.hashNametag(nametagId, defaultCountry);
 
   const content: BindingContent = {
     nametag_hash: hashedNametag,
     address: unicityAddress,
-    verified: Date.now(),
+    verified: Math.floor(Date.now() / 1000),
   };
+
+  const tags: string[][] = [
+    ['d', hashedNametag],
+    ['nametag', hashedNametag],
+    ['t', hashedNametag],
+    ['address', unicityAddress],
+    ['t', NametagUtils.hashAddressForTag(unicityAddress)],
+  ];
+
+  // Add extended identity fields when provided
+  if (identity) {
+    const encryptedNametag = await NametagUtils.encryptNametag(
+      nametagId,
+      keyManager.getPrivateKeyHex(),
+    );
+    content.encrypted_nametag = encryptedNametag;
+    // Plaintext nametag is intentionally stored in content for public resolution.
+    // Nametags must be publicly resolvable (sending to @alice requires knowing her
+    // addresses). Tag hashing provides relay-level privacy (operators see hashes in
+    // indexed tags, not plaintext). The encrypted copy enables private key recovery.
+    content.nametag = nametagId;
+
+    if (identity.publicKey) {
+      content.public_key = identity.publicKey;
+      tags.push(['t', NametagUtils.hashAddressForTag(identity.publicKey)]);
+      tags.push(['pubkey', identity.publicKey]);
+    }
+    if (identity.l1Address) {
+      content.l1_address = identity.l1Address;
+      tags.push(['t', NametagUtils.hashAddressForTag(identity.l1Address)]);
+      tags.push(['l1', identity.l1Address]);
+    }
+    if (identity.directAddress) {
+      content.direct_address = identity.directAddress;
+      tags.push(['t', NametagUtils.hashAddressForTag(identity.directAddress)]);
+    }
+    if (identity.proxyAddress) {
+      content.proxy_address = identity.proxyAddress;
+      tags.push(['t', NametagUtils.hashAddressForTag(identity.proxyAddress)]);
+    }
+  }
 
   const event = Event.create(keyManager, {
     kind: EventKinds.APP_DATA,
-    tags: [
-      ['d', hashedNametag],
-      ['nametag', hashedNametag],
-      ['t', hashedNametag],
-      ['address', unicityAddress],
-    ],
+    tags,
     content: JSON.stringify(content),
   });
 
   return event;
+}
+
+/**
+ * Create a base identity binding event (no nametag).
+ * Uses d-tag = SHA256('unicity:identity:' + nostrPubkey) so each wallet
+ * has exactly one identity binding event.
+ *
+ * @param keyManager Key manager with signing keys
+ * @param identity Identity parameters (publicKey, l1Address, directAddress)
+ * @returns Signed event
+ */
+export function createIdentityBindingEvent(
+  keyManager: NostrKeyManager,
+  identity: IdentityBindingParams,
+): Event {
+  const nostrPubkey = keyManager.getPublicKeyHex();
+  const dTag = NametagUtils.sha256Hex('unicity:identity:' + nostrPubkey);
+
+  const content: Record<string, string> = {};
+  const tags: string[][] = [
+    ['d', dTag],
+  ];
+
+  if (identity.publicKey) {
+    content.public_key = identity.publicKey;
+    tags.push(['t', NametagUtils.hashAddressForTag(identity.publicKey)]);
+  }
+  if (identity.l1Address) {
+    content.l1_address = identity.l1Address;
+    tags.push(['t', NametagUtils.hashAddressForTag(identity.l1Address)]);
+  }
+  if (identity.directAddress) {
+    content.direct_address = identity.directAddress;
+    tags.push(['t', NametagUtils.hashAddressForTag(identity.directAddress)]);
+  }
+  if (identity.proxyAddress) {
+    content.proxy_address = identity.proxyAddress;
+    tags.push(['t', NametagUtils.hashAddressForTag(identity.proxyAddress)]);
+  }
+
+  return Event.create(keyManager, {
+    kind: EventKinds.APP_DATA,
+    tags,
+    content: JSON.stringify(content),
+  });
 }
 
 /**
@@ -88,6 +218,22 @@ export function createNametagToPubkeyFilter(
 }
 
 /**
+ * Create a filter to query binding events by address hash.
+ * Query direction: address → binding event
+ *
+ * @param address Address string (DIRECT://..., alpha1..., PROXY://..., or chain pubkey)
+ * @returns Filter for nametag binding events
+ */
+export function createAddressToBindingFilter(address: string): Filter {
+  const hashedAddress = NametagUtils.hashAddressForTag(address);
+
+  return Filter.builder()
+    .kinds(EventKinds.APP_DATA)
+    .tTags(hashedAddress)
+    .build();
+}
+
+/**
  * Create a filter to query nametags by pubkey.
  * Query direction: pubkey → nametags
  *
@@ -100,6 +246,39 @@ export function createPubkeyToNametagFilter(nostrPubkey: string): Filter {
     .authors(nostrPubkey)
     .limit(10)
     .build();
+}
+
+/**
+ * Parse binding info from an event.
+ * Extracts both basic and extended identity fields from event content when possible.
+ * On parse failure, returns minimal binding info.
+ *
+ * @param event Binding event
+ * @returns BindingInfo with parsed fields when possible, or minimal info if content cannot be parsed
+ */
+export function parseBindingInfo(event: Event): BindingInfo {
+  try {
+    const content = JSON.parse(event.content) as BindingContent;
+    return {
+      transportPubkey: event.pubkey,
+      publicKey: content.public_key,
+      l1Address: content.l1_address,
+      directAddress: content.direct_address,
+      proxyAddress: content.proxy_address,
+      nametag: content.nametag,
+      timestamp: event.created_at * 1000,
+    };
+  } catch (e) {
+    // Content is not valid JSON — return minimal info.
+    // This can happen with old-format events or data corruption.
+    if (typeof console !== 'undefined') {
+      console.warn(`[nostr-sdk] Failed to parse binding event content (event ${event.id?.slice(0, 8)}):`, e);
+    }
+    return {
+      transportPubkey: event.pubkey,
+      timestamp: event.created_at * 1000,
+    };
+  }
 }
 
 /**

@@ -160,6 +160,53 @@ describe('NametagUtils', () => {
     });
   });
 
+  describe('hashAddressForTag', () => {
+    it('should produce consistent hashes', () => {
+      const hash1 = NametagUtils.hashAddressForTag('DIRECT://test');
+      const hash2 = NametagUtils.hashAddressForTag('DIRECT://test');
+      expect(hash1).toBe(hash2);
+    });
+
+    it('should produce 64-character hex hash', () => {
+      const hash = NametagUtils.hashAddressForTag('alpha1test');
+      expect(hash.length).toBe(64);
+      expect(/^[0-9a-f]+$/.test(hash)).toBe(true);
+    });
+
+    it('should produce different hashes for different addresses', () => {
+      const hash1 = NametagUtils.hashAddressForTag('DIRECT://a');
+      const hash2 = NametagUtils.hashAddressForTag('DIRECT://b');
+      expect(hash1).not.toBe(hash2);
+    });
+  });
+
+  describe('encryptNametag / decryptNametag', () => {
+    it('should round-trip encrypt and decrypt a nametag', async () => {
+      const km = NostrKeyManager.generate();
+      const encrypted = await NametagUtils.encryptNametag('alice', km.getPrivateKeyHex());
+      expect(typeof encrypted).toBe('string');
+      expect(encrypted.length).toBeGreaterThan(0);
+
+      const decrypted = await NametagUtils.decryptNametag(encrypted, km.getPrivateKeyHex());
+      expect(decrypted).toBe('alice');
+    });
+
+    it('should return null when decrypting with wrong key', async () => {
+      const km1 = NostrKeyManager.generate();
+      const km2 = NostrKeyManager.generate();
+      const encrypted = await NametagUtils.encryptNametag('alice', km1.getPrivateKeyHex());
+
+      const decrypted = await NametagUtils.decryptNametag(encrypted, km2.getPrivateKeyHex());
+      expect(decrypted).toBeNull();
+    });
+
+    it('should return null for invalid base64 input', async () => {
+      const km = NostrKeyManager.generate();
+      const decrypted = await NametagUtils.decryptNametag('not-valid-base64!!!', km.getPrivateKeyHex());
+      expect(decrypted).toBeNull();
+    });
+  });
+
   describe('constants', () => {
     it('should export NAMETAG_MIN_LENGTH', () => {
       expect(NametagUtils.NAMETAG_MIN_LENGTH).toBe(3);
@@ -188,6 +235,37 @@ describe('NametagBinding', () => {
 
       expect(event.kind).toBe(EventKinds.APP_DATA);
       expect(event.pubkey).toBe(keyManager.getPublicKeyHex());
+      expect(event.verify()).toBe(true);
+    });
+
+    it('should reject invalid nametags', async () => {
+      await expect(
+        NametagBinding.createBindingEvent(keyManager, 'ab', 'addr')
+      ).rejects.toThrow(/Invalid nametag/);
+
+      await expect(
+        NametagBinding.createBindingEvent(keyManager, '', 'addr')
+      ).rejects.toThrow(/Invalid nametag/);
+
+      await expect(
+        NametagBinding.createBindingEvent(keyManager, 'a'.repeat(21), 'addr')
+      ).rejects.toThrow(/Invalid nametag/);
+
+      await expect(
+        NametagBinding.createBindingEvent(keyManager, 'foo.bar', 'addr')
+      ).rejects.toThrow(/Invalid nametag/);
+
+      await expect(
+        NametagBinding.createBindingEvent(keyManager, 'hello world', 'addr')
+      ).rejects.toThrow(/Invalid nametag/);
+    });
+
+    it('should accept valid phone numbers', async () => {
+      const event = await NametagBinding.createBindingEvent(
+        keyManager,
+        '+14155552671',
+        'addr'
+      );
       expect(event.verify()).toBe(true);
     });
 
@@ -231,6 +309,113 @@ describe('NametagBinding', () => {
       expect(content.address).toBe('unicity_address_123');
       expect(content.verified).toBeDefined();
     });
+
+    it('should include hashed t-tag for unicityAddress', async () => {
+      const event = await NametagBinding.createBindingEvent(
+        keyManager,
+        'alice',
+        'unicity_address_123'
+      );
+
+      const expectedHash = NametagUtils.hashAddressForTag('unicity_address_123');
+      const tTags = event.tags.filter((t: string[]) => t[0] === 't').map((t: string[]) => t[1]);
+      expect(tTags).toContain(expectedHash);
+    });
+
+    it('should include identity fields in content and tags when provided', async () => {
+      const identity = {
+        publicKey: '02' + 'a'.repeat(64),
+        l1Address: 'alpha1testaddr',
+        directAddress: 'DIRECT://test',
+        proxyAddress: 'PROXY://test',
+      };
+
+      const event = await NametagBinding.createBindingEvent(
+        keyManager,
+        'alice',
+        'unicity_address_123',
+        'US',
+        identity,
+      );
+
+      // Content should have identity fields
+      const content = JSON.parse(event.content);
+      expect(content.public_key).toBe(identity.publicKey);
+      expect(content.l1_address).toBe(identity.l1Address);
+      expect(content.direct_address).toBe(identity.directAddress);
+      expect(content.proxy_address).toBe(identity.proxyAddress);
+      expect(content.nametag).toBe('alice');
+      expect(content.encrypted_nametag).toBeDefined();
+
+      // Tags should have hashed t-tags for each address
+      const tTags = event.tags.filter((t: string[]) => t[0] === 't').map((t: string[]) => t[1]);
+      expect(tTags).toContain(NametagUtils.hashAddressForTag(identity.publicKey));
+      expect(tTags).toContain(NametagUtils.hashAddressForTag(identity.l1Address));
+      expect(tTags).toContain(NametagUtils.hashAddressForTag(identity.directAddress));
+      expect(tTags).toContain(NametagUtils.hashAddressForTag(identity.proxyAddress));
+
+      // Backward-compat plaintext tags
+      expect(event.getTagValue('pubkey')).toBe(identity.publicKey);
+      expect(event.getTagValue('l1')).toBe(identity.l1Address);
+    });
+  });
+
+  describe('createIdentityBindingEvent', () => {
+    it('should create event with identity-based d-tag', () => {
+      const event = NametagBinding.createIdentityBindingEvent(keyManager, {
+        publicKey: '02' + 'a'.repeat(64),
+        l1Address: 'alpha1test',
+        directAddress: 'DIRECT://test',
+      });
+
+      expect(event.kind).toBe(EventKinds.APP_DATA);
+      expect(event.verify()).toBe(true);
+
+      // d-tag should be hash of 'unicity:identity:' + nostrPubkey
+      const expectedDTag = NametagUtils.sha256Hex('unicity:identity:' + keyManager.getPublicKeyHex());
+      expect(event.getTagValue('d')).toBe(expectedDTag);
+    });
+
+    it('should include hashed t-tags for all addresses', () => {
+      const identity = {
+        publicKey: '02' + 'b'.repeat(64),
+        l1Address: 'alpha1xyz',
+        directAddress: 'DIRECT://xyz',
+      };
+
+      const event = NametagBinding.createIdentityBindingEvent(keyManager, identity);
+      const tTags = event.tags.filter((t: string[]) => t[0] === 't').map((t: string[]) => t[1]);
+
+      expect(tTags).toContain(NametagUtils.hashAddressForTag(identity.publicKey));
+      expect(tTags).toContain(NametagUtils.hashAddressForTag(identity.l1Address));
+      expect(tTags).toContain(NametagUtils.hashAddressForTag(identity.directAddress));
+    });
+
+    it('should include identity fields in content', () => {
+      const identity = {
+        publicKey: '02' + 'c'.repeat(64),
+        l1Address: 'alpha1abc',
+        directAddress: 'DIRECT://abc',
+      };
+
+      const event = NametagBinding.createIdentityBindingEvent(keyManager, identity);
+      const content = JSON.parse(event.content);
+
+      expect(content.public_key).toBe(identity.publicKey);
+      expect(content.l1_address).toBe(identity.l1Address);
+      expect(content.direct_address).toBe(identity.directAddress);
+    });
+
+    it('should NOT include nametag or encrypted_nametag', () => {
+      const event = NametagBinding.createIdentityBindingEvent(keyManager, {
+        publicKey: '02' + 'd'.repeat(64),
+      });
+      const content = JSON.parse(event.content);
+
+      expect(content.nametag).toBeUndefined();
+      expect(content.encrypted_nametag).toBeUndefined();
+      expect(content.nametag_hash).toBeUndefined();
+    });
   });
 
   describe('createNametagToPubkeyFilter', () => {
@@ -239,6 +424,26 @@ describe('NametagBinding', () => {
 
       expect(filter.kinds).toContain(EventKinds.APP_DATA);
       expect(filter['#t']).toContain(NametagUtils.hashNametag('alice'));
+    });
+
+    it('should not set a limit (relay returns all matching events)', () => {
+      const filter = NametagBinding.createNametagToPubkeyFilter('alice');
+      expect(filter.limit).toBeUndefined();
+    });
+  });
+
+  describe('createAddressToBindingFilter', () => {
+    it('should create filter with hashed address in #t tag', () => {
+      const address = 'DIRECT://test123';
+      const filter = NametagBinding.createAddressToBindingFilter(address);
+
+      expect(filter.kinds).toContain(EventKinds.APP_DATA);
+      expect(filter['#t']).toContain(NametagUtils.hashAddressForTag(address));
+    });
+
+    it('should not set a limit (relay returns all matching events)', () => {
+      const filter = NametagBinding.createAddressToBindingFilter('alpha1test');
+      expect(filter.limit).toBeUndefined();
     });
   });
 
@@ -276,6 +481,59 @@ describe('NametagBinding', () => {
 
       const address = NametagBinding.parseAddressFromEvent(event);
       expect(address).toBe('unicity_address_123');
+    });
+  });
+
+  describe('parseBindingInfo', () => {
+    it('should parse basic fields from event content', async () => {
+      const event = await NametagBinding.createBindingEvent(
+        keyManager,
+        'alice',
+        'unicity_address_123'
+      );
+
+      const info = NametagBinding.parseBindingInfo(event);
+      expect(info.transportPubkey).toBe(keyManager.getPublicKeyHex());
+      expect(info.timestamp).toBe(event.created_at * 1000);
+    });
+
+    it('should parse extended identity fields from event content', async () => {
+      const identity = {
+        publicKey: '02' + 'a'.repeat(64),
+        l1Address: 'alpha1testaddr',
+        directAddress: 'DIRECT://test',
+        proxyAddress: 'PROXY://test',
+      };
+
+      const event = await NametagBinding.createBindingEvent(
+        keyManager,
+        'alice',
+        'unicity_address_123',
+        'US',
+        identity,
+      );
+
+      const info = NametagBinding.parseBindingInfo(event);
+      expect(info.publicKey).toBe(identity.publicKey);
+      expect(info.l1Address).toBe(identity.l1Address);
+      expect(info.directAddress).toBe(identity.directAddress);
+      expect(info.proxyAddress).toBe(identity.proxyAddress);
+      expect(info.nametag).toBe('alice');
+    });
+
+    it('should return minimal info when content is invalid JSON', async () => {
+      const { Event } = await import('../../src/protocol/Event.js');
+      const event = Event.create(keyManager, {
+        kind: EventKinds.APP_DATA,
+        tags: [['d', 'test']],
+        content: 'not valid json',
+      });
+
+      const info = NametagBinding.parseBindingInfo(event);
+      expect(info.transportPubkey).toBe(keyManager.getPublicKeyHex());
+      expect(info.timestamp).toBe(event.created_at * 1000);
+      expect(info.publicKey).toBeUndefined();
+      expect(info.nametag).toBeUndefined();
     });
   });
 

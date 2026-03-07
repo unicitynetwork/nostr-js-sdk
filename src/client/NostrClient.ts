@@ -17,6 +17,14 @@ import {
 } from './WebSocketAdapter.js';
 import * as NIP17 from '../messaging/nip17.js';
 import type { PrivateMessage, PrivateMessageOptions } from '../messaging/types.js';
+import {
+  createBindingEvent,
+  createNametagToPubkeyFilter,
+  createAddressToBindingFilter,
+  createIdentityBindingEvent,
+  parseBindingInfo,
+} from '../nametag/NametagBinding.js';
+import type { IdentityBindingParams, BindingInfo } from '../nametag/NametagBinding.js';
 
 /** Connection timeout in milliseconds */
 const CONNECTION_TIMEOUT_MS = 30000;
@@ -863,20 +871,50 @@ export class NostrClient {
 
   /**
    * Publish a nametag binding.
+   * Checks for existing claims by other pubkeys before publishing.
    * @param nametagId Nametag identifier
    * @param unicityAddress Unicity address
    * @returns Promise that resolves with success status
+   * @throws Error if nametag is invalid or already claimed by another pubkey
    */
   async publishNametagBinding(
     nametagId: string,
-    unicityAddress: string
+    unicityAddress: string,
+    identity?: IdentityBindingParams,
   ): Promise<boolean> {
-    const NametagBinding = await import('../nametag/NametagBinding.js');
-    const event = await NametagBinding.createBindingEvent(
+    // Check if already claimed by another pubkey
+    const existingOwner = await this.queryPubkeyByNametag(nametagId);
+    if (existingOwner && existingOwner !== this.keyManager.getPublicKeyHex()) {
+      throw new Error(
+        `Nametag "${nametagId}" is already claimed by another pubkey`
+      );
+    }
+
+    const event = await createBindingEvent(
       this.keyManager,
       nametagId,
-      unicityAddress
+      unicityAddress,
+      undefined,
+      identity,
     );
+
+    try {
+      await this.publishEvent(event);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Publish a base identity binding (no nametag).
+   * Uses d-tag = SHA256('unicity:identity:' + nostrPubkey) so each wallet
+   * has exactly one identity binding. Subsequent calls replace the previous event.
+   * @param identity Identity parameters (publicKey, l1Address, directAddress)
+   * @returns true if published successfully
+   */
+  async publishIdentityBinding(identity: IdentityBindingParams): Promise<boolean> {
+    const event = createIdentityBindingEvent(this.keyManager, identity);
 
     try {
       await this.publishEvent(event);
@@ -956,38 +994,116 @@ export class NostrClient {
   }
 
   /**
-   * Query for a public key by nametag.
-   * @param nametagId Nametag identifier
-   * @returns Promise that resolves with the public key hex, or null if not found
+   * Query binding events with first-seen-wins anti-hijacking resolution.
+   *
+   * Strategy: first-seen-wins across authors, latest-wins for same author.
+   * - Across authors: the pubkey that first published wins (earliest created_at)
+   * - Same author: the most recent event is used (latest created_at = most complete data)
+   * - Tie-breaking: deterministic by lexicographic pubkey comparison (lowest wins)
+   *
+   * Events with invalid signatures are silently skipped to prevent relay injection attacks.
+   *
+   * Known limitations:
+   * - Timestamps are self-reported (NIP-01). An attacker can set created_at to 0.
+   *   Chain-anchored proof of registration time is the only reliable defense.
+   * - TOCTOU: between conflict check and publish, another user can claim the same nametag.
+   *   This is inherent to Nostr's eventually-consistent relay model.
+   *
+   * @param filter Subscription filter
+   * @param extractResult Callback to extract the desired result from the winning event
+   * @returns Promise resolving to the extracted result, or null
    */
-  async queryPubkeyByNametag(nametagId: string): Promise<string | null> {
-    const NametagBinding = await import('../nametag/NametagBinding.js');
-    const filter = NametagBinding.createNametagToPubkeyFilter(nametagId);
-
+  private queryWithFirstSeenWins<T>(
+    filter: Filter,
+    extractResult: (event: Event) => T,
+  ): Promise<T | null> {
     return new Promise((resolve) => {
+      let subscriptionId = '';
+
       const timeoutId = setTimeout(() => {
-        this.unsubscribe(subscriptionId);
+        if (subscriptionId) this.unsubscribe(subscriptionId);
         resolve(null);
       }, this.queryTimeoutMs);
 
-      let result: string | null = null;
-      let latestCreatedAt = 0;
+      const authors = new Map<string, { firstSeen: number; latestEvent: Event }>();
 
-      const subscriptionId = this.subscribe(filter, {
+      subscriptionId = this.subscribe(filter, {
         onEvent: (event) => {
-          // Keep the most recent binding
-          if (event.created_at > latestCreatedAt) {
-            latestCreatedAt = event.created_at;
-            result = event.pubkey;
+          // Verify signature to prevent relay injection of forged events (#4)
+          if (!event.verify()) return;
+
+          const existing = authors.get(event.pubkey);
+          if (!existing) {
+            authors.set(event.pubkey, { firstSeen: event.created_at, latestEvent: event });
+          } else {
+            if (event.created_at < existing.firstSeen) {
+              existing.firstSeen = event.created_at;
+            }
+            if (event.created_at > existing.latestEvent.created_at) {
+              existing.latestEvent = event;
+            }
           }
         },
         onEndOfStoredEvents: () => {
           clearTimeout(timeoutId);
           this.unsubscribe(subscriptionId);
-          resolve(result);
+
+          let winnerEntry: { firstSeen: number; latestEvent: Event } | null = null;
+          let winnerPubkey = '';
+          for (const [pubkey, entry] of authors) {
+            if (!winnerEntry
+                || entry.firstSeen < winnerEntry.firstSeen
+                || (entry.firstSeen === winnerEntry.firstSeen && pubkey < winnerPubkey)) {
+              winnerEntry = entry;
+              winnerPubkey = pubkey;
+            }
+          }
+
+          resolve(winnerEntry ? extractResult(winnerEntry.latestEvent) : null);
         },
       });
     });
+  }
+
+  /**
+   * Query for a public key by nametag.
+   * Uses first-seen-wins anti-hijacking resolution.
+   * @param nametagId Nametag identifier
+   * @returns Promise that resolves with the public key hex, or null if not found
+   */
+  async queryPubkeyByNametag(nametagId: string): Promise<string | null> {
+    return this.queryWithFirstSeenWins(
+      createNametagToPubkeyFilter(nametagId),
+      (event) => event.pubkey,
+    );
+  }
+
+  /**
+   * Query for full binding info by nametag.
+   * Returns extended identity fields (chain pubkey, addresses, etc.) when available.
+   * Uses first-seen-wins across authors, latest-wins for same author.
+   * @param nametagId Nametag identifier
+   * @returns Promise that resolves with BindingInfo, or null if not found
+   */
+  async queryBindingByNametag(nametagId: string): Promise<BindingInfo | null> {
+    return this.queryWithFirstSeenWins(
+      createNametagToPubkeyFilter(nametagId),
+      parseBindingInfo,
+    );
+  }
+
+  /**
+   * Query for binding info by address (reverse lookup).
+   * Supports DIRECT://, PROXY://, alpha1..., or chain pubkey lookups.
+   * Uses first-seen-wins across authors, latest-wins for same author.
+   * @param address Address string
+   * @returns Promise that resolves with BindingInfo, or null if not found
+   */
+  async queryBindingByAddress(address: string): Promise<BindingInfo | null> {
+    return this.queryWithFirstSeenWins(
+      createAddressToBindingFilter(address),
+      parseBindingInfo,
+    );
   }
 
   /**
