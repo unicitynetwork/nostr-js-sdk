@@ -6,6 +6,50 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { NostrClient, ConnectionEventListener } from '../../src/client/NostrClient.js';
 import { NostrKeyManager } from '../../src/NostrKeyManager.js';
 import { Filter } from '../../src/protocol/Filter.js';
+import type { IWebSocket, WebSocketMessageEvent, WebSocketCloseEvent, WebSocketErrorEvent } from '../../src/client/WebSocketAdapter.js';
+import { OPEN, CLOSED } from '../../src/client/WebSocketAdapter.js';
+
+// Mock createWebSocket to return a controllable fake socket
+vi.mock('../../src/client/WebSocketAdapter.js', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../../src/client/WebSocketAdapter.js')>();
+  return {
+    ...orig,
+    createWebSocket: vi.fn(),
+  };
+});
+import { createWebSocket } from '../../src/client/WebSocketAdapter.js';
+const mockCreateWebSocket = vi.mocked(createWebSocket);
+
+/** Create a fake IWebSocket that captures handlers and tracks calls. */
+function createFakeSocket(): IWebSocket & {
+  _triggerOpen(): void;
+  _triggerMessage(data: string): void;
+  _triggerClose(code?: number, reason?: string): void;
+  sentMessages: string[];
+  closeCalls: Array<{ code?: number; reason?: string }>;
+  _readyState: number;
+} {
+  const socket: ReturnType<typeof createFakeSocket> = {
+    _readyState: OPEN,
+    get readyState() { return this._readyState; },
+    onopen: null,
+    onmessage: null,
+    onclose: null,
+    onerror: null,
+    sentMessages: [],
+    closeCalls: [],
+    send(data: string) { this.sentMessages.push(data); },
+    close(code?: number, reason?: string) {
+      this.closeCalls.push({ code, reason });
+      this._readyState = CLOSED;
+      if (this.onclose) this.onclose({ code: code ?? 1000, reason: reason ?? '' });
+    },
+    _triggerOpen() { if (this.onopen) this.onopen({}); },
+    _triggerMessage(data: string) { if (this.onmessage) this.onmessage({ data } as WebSocketMessageEvent); },
+    _triggerClose(code = 1000, reason = '') { this.close(code, reason); },
+  };
+  return socket;
+}
 
 describe('NostrClient Reconnection', () => {
   let client: NostrClient;
@@ -151,32 +195,115 @@ describe('NostrClient Reconnection', () => {
   });
 
   describe('ping health check logic', () => {
-    it('should detect stale connections after 2x ping interval', () => {
-      const pingInterval = 30000;
-      const staleThreshold = pingInterval * 2;
+    const PING_INTERVAL = 15000;
+    let fakeSocket: ReturnType<typeof createFakeSocket>;
 
-      // Simulate last pong time
-      const lastPongTime = Date.now() - (staleThreshold + 1000);
-      const timeSinceLastPong = Date.now() - lastPongTime;
+    async function connectClient(opts?: { pingIntervalMs?: number }): Promise<void> {
+      client = new NostrClient(keyManager, { pingIntervalMs: opts?.pingIntervalMs ?? PING_INTERVAL });
+      fakeSocket = createFakeSocket();
+      mockCreateWebSocket.mockResolvedValue(fakeSocket);
+      const connectPromise = client.connect('wss://relay.test');
+      // createWebSocket resolves, then onopen fires
+      await vi.advanceTimersByTimeAsync(0);
+      fakeSocket._triggerOpen();
+      await connectPromise;
+      // Clear any messages sent during connect (subscription reestablishment etc.)
+      fakeSocket.sentMessages.length = 0;
+    }
 
-      expect(timeSinceLastPong > staleThreshold).toBe(true);
+    it('should send ping REQ at each interval', async () => {
+      await connectClient();
+
+      await vi.advanceTimersByTimeAsync(PING_INTERVAL);
+      const pings = fakeSocket.sentMessages.filter(m => m.includes('"ping"'));
+      expect(pings.length).toBe(2); // CLOSE ping + REQ ping
+      expect(pings[0]).toBe(JSON.stringify(['CLOSE', 'ping']));
+      expect(pings[1]).toBe(JSON.stringify(['REQ', 'ping', { limit: 1 }]));
     });
 
-    it('should not detect fresh connections as stale', () => {
-      const pingInterval = 30000;
-      const staleThreshold = pingInterval * 2;
+    it('should close socket after 2 unanswered pings when relay is dead', async () => {
+      await connectClient();
 
-      // Simulate recent pong
-      const lastPongTime = Date.now() - 5000;
-      const timeSinceLastPong = Date.now() - lastPongTime;
+      // With 15s interval and 2x stale threshold (30s):
+      // Tick 1 (T=15s): timeSinceLastPong=15s ≤ 30s. Sends ping, unanswered=1.
+      await vi.advanceTimersByTimeAsync(PING_INTERVAL);
+      expect(fakeSocket.closeCalls.length).toBe(0);
 
-      expect(timeSinceLastPong > staleThreshold).toBe(false);
+      // Tick 2 (T=30s): timeSinceLastPong=30s ≤ 30s. Sends ping, unanswered=2.
+      await vi.advanceTimersByTimeAsync(PING_INTERVAL);
+      expect(fakeSocket.closeCalls.length).toBe(0);
+
+      // Tick 3 (T=45s): timeSinceLastPong=45s > 30s AND unanswered=2 ≥ 2 → STALE
+      await vi.advanceTimersByTimeAsync(PING_INTERVAL);
+      expect(fakeSocket.closeCalls.length).toBe(1);
     });
 
-    it('should be disabled when pingIntervalMs is 0', () => {
-      client = new NostrClient(keyManager, { pingIntervalMs: 0 });
-      // Client created without error, ping is disabled
-      expect(client).toBeDefined();
+    it('should not close socket when relay responds to pings', async () => {
+      await connectClient();
+
+      // Run 10 ping cycles, responding to each one
+      for (let i = 0; i < 10; i++) {
+        await vi.advanceTimersByTimeAsync(PING_INTERVAL);
+        // Relay responds — resets unansweredPings and lastPongTime
+        fakeSocket._triggerMessage(JSON.stringify(['EOSE', 'ping']));
+      }
+
+      expect(fakeSocket.closeCalls.length).toBe(0);
+    });
+
+    it('should reset unanswered counter on any inbound message', async () => {
+      await connectClient();
+
+      // Tick 1 (T=15s): unanswered=1
+      await vi.advanceTimersByTimeAsync(PING_INTERVAL);
+      expect(fakeSocket.closeCalls.length).toBe(0);
+
+      // Tick 2 (T=30s): unanswered=2
+      await vi.advanceTimersByTimeAsync(PING_INTERVAL);
+      expect(fakeSocket.closeCalls.length).toBe(0);
+
+      // Before tick 3, relay sends a message — resets counter to 0 and updates lastPongTime
+      fakeSocket._triggerMessage(JSON.stringify(['EVENT', 'sub1', { id: '123' }]));
+
+      // Tick 3 (T=45s): timeSinceLastPong is small now, unanswered=0 → just sends ping
+      await vi.advanceTimersByTimeAsync(PING_INTERVAL);
+      expect(fakeSocket.closeCalls.length).toBe(0);
+
+      // Tick 4 (T=60s): unanswered=1 still under threshold
+      await vi.advanceTimersByTimeAsync(PING_INTERVAL);
+      expect(fakeSocket.closeCalls.length).toBe(0);
+    });
+
+    it('should close stale relay that stops responding mid-session', async () => {
+      await connectClient();
+
+      // Relay is alive for 5 cycles
+      for (let i = 0; i < 5; i++) {
+        await vi.advanceTimersByTimeAsync(PING_INTERVAL);
+        fakeSocket._triggerMessage(JSON.stringify(['EOSE', 'ping']));
+      }
+      expect(fakeSocket.closeCalls.length).toBe(0);
+
+      // Now relay stops responding — needs 3 more ticks (accumulate 2 unanswered + time threshold)
+      // Tick 6: unanswered=1, timeSinceLastPong=15s ≤ 30s
+      await vi.advanceTimersByTimeAsync(PING_INTERVAL);
+      expect(fakeSocket.closeCalls.length).toBe(0);
+
+      // Tick 7: unanswered=2, timeSinceLastPong=30s ≤ 30s
+      await vi.advanceTimersByTimeAsync(PING_INTERVAL);
+      expect(fakeSocket.closeCalls.length).toBe(0);
+
+      // Tick 8: unanswered=2, timeSinceLastPong=45s > 30s → STALE
+      await vi.advanceTimersByTimeAsync(PING_INTERVAL);
+      expect(fakeSocket.closeCalls.length).toBe(1);
+    });
+
+    it('should not send pings when pingIntervalMs is 0', async () => {
+      await connectClient({ pingIntervalMs: 0 });
+
+      await vi.advanceTimersByTimeAsync(120000);
+      expect(fakeSocket.sentMessages.length).toBe(0);
+      expect(fakeSocket.closeCalls.length).toBe(0);
     });
   });
 

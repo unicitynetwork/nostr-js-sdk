@@ -103,6 +103,7 @@ interface RelayConnection {
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   pingTimer: ReturnType<typeof setInterval> | null;
   lastPongTime: number;
+  unansweredPings: number;
   wasConnected: boolean;  // Track if this relay was previously connected (for reconnect vs initial connect)
 }
 
@@ -264,6 +265,7 @@ export class NostrClient {
             reconnectTimer: null,
             pingTimer: null,
             lastPongTime: Date.now(),
+            unansweredPings: 0,
             wasConnected: existingRelay?.wasConnected ?? false,
           };
 
@@ -297,10 +299,11 @@ export class NostrClient {
           socket.onmessage = (event) => {
             try {
               const data = extractMessageData(event);
-              // Update last pong time on any message (relay is alive)
+              // Update last pong time and reset unanswered pings on any message (relay is alive)
               const r = this.relays.get(url);
               if (r) {
                 r.lastPongTime = Date.now();
+                r.unansweredPings = 0;
               }
               this.handleRelayMessage(url, data);
             } catch (error) {
@@ -396,11 +399,17 @@ export class NostrClient {
         return;
       }
 
-      // Check if we've received any message recently
       const timeSinceLastPong = Date.now() - relay.lastPongTime;
-      if (timeSinceLastPong > this.pingIntervalMs * 2) {
-        // Connection is stale - force close and reconnect
-        console.warn(`Relay ${url} appears stale (no response for ${timeSinceLastPong}ms), reconnecting...`);
+
+      if (timeSinceLastPong > this.pingIntervalMs * 2 && relay.unansweredPings >= 2) {
+        // No inbound message for 2x the ping interval AND we've sent at least 2 pings
+        // without any response — the connection is truly stale.
+        // The unanswered pings gate handles browser tab throttling: on the first tick
+        // after waking, unansweredPings is 0, so we send a ping and wait. If the relay
+        // is alive it responds (resetting the counter). If dead, subsequent ticks
+        // increment the counter until it reaches the threshold, even under sustained
+        // throttling where intervals are irregular.
+        console.warn(`Relay ${url} appears stale (no response for ${timeSinceLastPong}ms, ${relay.unansweredPings} unanswered pings), reconnecting...`);
         this.stopPingTimer(url);
         try {
           relay.socket.close();
@@ -421,6 +430,7 @@ export class NostrClient {
         // Then send the new ping request (limit:1 ensures relay sends EOSE)
         const pingMessage = JSON.stringify(['REQ', pingSubId, { limit: 1 }]);
         relay.socket.send(pingMessage);
+        relay.unansweredPings++;
       } catch {
         // Send failed, connection likely dead
         console.warn(`Ping to ${url} failed, reconnecting...`);
