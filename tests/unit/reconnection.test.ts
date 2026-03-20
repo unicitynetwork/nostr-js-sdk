@@ -151,15 +151,22 @@ describe('NostrClient Reconnection', () => {
   });
 
   describe('ping health check logic', () => {
-    it('should detect stale connections after 2x ping interval', () => {
+    it('should detect stale connections after 2x ping interval when ping was sent recently', () => {
       const pingInterval = 30000;
       const staleThreshold = pingInterval * 2;
+      const now = Date.now();
 
-      // Simulate last pong time
-      const lastPongTime = Date.now() - (staleThreshold + 1000);
-      const timeSinceLastPong = Date.now() - lastPongTime;
+      // Simulate last pong time exceeding threshold
+      const lastPongTime = now - (staleThreshold + 1000);
+      const timeSinceLastPong = now - lastPongTime;
 
+      // Simulate a ping sent recently (within 1.5x interval)
+      const lastPingSentTime = now - pingInterval;
+      const timeSinceLastPing = now - lastPingSentTime;
+
+      // Both conditions must be true for stale detection
       expect(timeSinceLastPong > staleThreshold).toBe(true);
+      expect(lastPingSentTime > 0 && timeSinceLastPing < pingInterval * 1.5).toBe(true);
     });
 
     it('should not detect fresh connections as stale', () => {
@@ -171,6 +178,24 @@ describe('NostrClient Reconnection', () => {
       const timeSinceLastPong = Date.now() - lastPongTime;
 
       expect(timeSinceLastPong > staleThreshold).toBe(false);
+    });
+
+    it('should not detect stale when timer was throttled (e.g., background tab)', () => {
+      const pingInterval = 30000;
+      const staleThreshold = pingInterval * 2;
+      const now = Date.now();
+
+      // Simulate tab backgrounded: last pong was 65s ago
+      const lastPongTime = now - 65000;
+      const timeSinceLastPong = now - lastPongTime;
+
+      // But the last ping was also 65s ago (timer was throttled, no recent ping sent)
+      const lastPingSentTime = now - 65000;
+      const timeSinceLastPing = now - lastPingSentTime;
+
+      // Pong threshold exceeded, but ping wasn't sent recently — not truly stale
+      expect(timeSinceLastPong > staleThreshold).toBe(true);
+      expect(lastPingSentTime > 0 && timeSinceLastPing < pingInterval * 1.5).toBe(false);
     });
 
     it('should be disabled when pingIntervalMs is 0', () => {

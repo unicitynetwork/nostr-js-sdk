@@ -103,6 +103,7 @@ interface RelayConnection {
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   pingTimer: ReturnType<typeof setInterval> | null;
   lastPongTime: number;
+  lastPingSentTime: number;
   wasConnected: boolean;  // Track if this relay was previously connected (for reconnect vs initial connect)
 }
 
@@ -264,6 +265,7 @@ export class NostrClient {
             reconnectTimer: null,
             pingTimer: null,
             lastPongTime: Date.now(),
+            lastPingSentTime: 0,
             wasConnected: existingRelay?.wasConnected ?? false,
           };
 
@@ -396,18 +398,28 @@ export class NostrClient {
         return;
       }
 
-      // Check if we've received any message recently
-      const timeSinceLastPong = Date.now() - relay.lastPongTime;
+      const now = Date.now();
+      const timeSinceLastPong = now - relay.lastPongTime;
+
       if (timeSinceLastPong > this.pingIntervalMs * 2) {
-        // Connection is stale - force close and reconnect
-        console.warn(`Relay ${url} appears stale (no response for ${timeSinceLastPong}ms), reconnecting...`);
-        this.stopPingTimer(url);
-        try {
-          relay.socket.close();
-        } catch {
-          // Ignore close errors
+        // Only declare stale if we actually sent a ping recently.
+        // If the timer was throttled (e.g., browser tab backgrounded), the interval
+        // may fire much later than expected. In that case, we haven't sent a ping
+        // recently, so we can't conclude the relay is stale — just send a new ping
+        // and check again on the next interval.
+        const timeSinceLastPing = now - relay.lastPingSentTime;
+        if (relay.lastPingSentTime > 0 && timeSinceLastPing < this.pingIntervalMs * 1.5) {
+          // We sent a ping recently and got no response - connection is truly stale
+          console.warn(`Relay ${url} appears stale (no response for ${timeSinceLastPong}ms), reconnecting...`);
+          this.stopPingTimer(url);
+          try {
+            relay.socket.close();
+          } catch {
+            // Ignore close errors
+          }
+          return;
         }
-        return;
+        // Timer was likely throttled — fall through to send a ping
       }
 
       // Send a subscription request as a ping (relays respond with EOSE)
@@ -421,6 +433,7 @@ export class NostrClient {
         // Then send the new ping request (limit:1 ensures relay sends EOSE)
         const pingMessage = JSON.stringify(['REQ', pingSubId, { limit: 1 }]);
         relay.socket.send(pingMessage);
+        relay.lastPingSentTime = now;
       } catch {
         // Send failed, connection likely dead
         console.warn(`Ping to ${url} failed, reconnecting...`);
