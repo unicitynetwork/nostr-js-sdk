@@ -103,7 +103,7 @@ interface RelayConnection {
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   pingTimer: ReturnType<typeof setInterval> | null;
   lastPongTime: number;
-  lastPingSentTime: number;
+  unansweredPings: number;
   wasConnected: boolean;  // Track if this relay was previously connected (for reconnect vs initial connect)
 }
 
@@ -265,7 +265,7 @@ export class NostrClient {
             reconnectTimer: null,
             pingTimer: null,
             lastPongTime: Date.now(),
-            lastPingSentTime: 0,
+            unansweredPings: 0,
             wasConnected: existingRelay?.wasConnected ?? false,
           };
 
@@ -299,10 +299,11 @@ export class NostrClient {
           socket.onmessage = (event) => {
             try {
               const data = extractMessageData(event);
-              // Update last pong time on any message (relay is alive)
+              // Update last pong time and reset unanswered pings on any message (relay is alive)
               const r = this.relays.get(url);
               if (r) {
                 r.lastPongTime = Date.now();
+                r.unansweredPings = 0;
               }
               this.handleRelayMessage(url, data);
             } catch (error) {
@@ -398,28 +399,24 @@ export class NostrClient {
         return;
       }
 
-      const now = Date.now();
-      const timeSinceLastPong = now - relay.lastPongTime;
+      const timeSinceLastPong = Date.now() - relay.lastPongTime;
 
-      if (timeSinceLastPong > this.pingIntervalMs * 2) {
-        // Only declare stale if we actually sent a ping recently.
-        // If the timer was throttled (e.g., browser tab backgrounded), the interval
-        // may fire much later than expected. In that case, we haven't sent a ping
-        // recently, so we can't conclude the relay is stale — just send a new ping
-        // and check again on the next interval.
-        const timeSinceLastPing = now - relay.lastPingSentTime;
-        if (relay.lastPingSentTime > 0 && timeSinceLastPing < this.pingIntervalMs * 1.5) {
-          // We sent a ping recently and got no response - connection is truly stale
-          console.warn(`Relay ${url} appears stale (no response for ${timeSinceLastPong}ms), reconnecting...`);
-          this.stopPingTimer(url);
-          try {
-            relay.socket.close();
-          } catch {
-            // Ignore close errors
-          }
-          return;
+      if (timeSinceLastPong > this.pingIntervalMs * 2 && relay.unansweredPings >= 2) {
+        // No inbound message for 2x the ping interval AND we've sent at least 2 pings
+        // without any response — the connection is truly stale.
+        // The unanswered pings gate handles browser tab throttling: on the first tick
+        // after waking, unansweredPings is 0, so we send a ping and wait. If the relay
+        // is alive it responds (resetting the counter). If dead, subsequent ticks
+        // increment the counter until it reaches the threshold, even under sustained
+        // throttling where intervals are irregular.
+        console.warn(`Relay ${url} appears stale (no response for ${timeSinceLastPong}ms, ${relay.unansweredPings} unanswered pings), reconnecting...`);
+        this.stopPingTimer(url);
+        try {
+          relay.socket.close();
+        } catch {
+          // Ignore close errors
         }
-        // Timer was likely throttled — fall through to send a ping
+        return;
       }
 
       // Send a subscription request as a ping (relays respond with EOSE)
@@ -433,7 +430,7 @@ export class NostrClient {
         // Then send the new ping request (limit:1 ensures relay sends EOSE)
         const pingMessage = JSON.stringify(['REQ', pingSubId, { limit: 1 }]);
         relay.socket.send(pingMessage);
-        relay.lastPingSentTime = now;
+        relay.unansweredPings++;
       } catch {
         // Send failed, connection likely dead
         console.warn(`Ping to ${url} failed, reconnecting...`);
