@@ -38,6 +38,7 @@ const mockCreateWebSocket = vi.mocked(createWebSocket);
 function createFakeSocket(): IWebSocket & {
   _triggerOpen(): void;
   _triggerMessage(data: string): void;
+  _triggerClose(code?: number, reason?: string): void;
   sentMessages: string[];
   _readyState: number;
 } {
@@ -50,10 +51,17 @@ function createFakeSocket(): IWebSocket & {
     onerror: null,
     sentMessages: [],
     send(data: string) { this.sentMessages.push(data); },
-    close() { this._readyState = CLOSED; },
+    close(code?: number, reason?: string) {
+      this._readyState = CLOSED;
+      if (this.onclose) this.onclose({ code: code ?? 1000, reason: reason ?? '' });
+    },
     _triggerOpen() { if (this.onopen) this.onopen({}); },
     _triggerMessage(data: string) {
       if (this.onmessage) this.onmessage({ data } as WebSocketMessageEvent);
+    },
+    _triggerClose(code = 1006, reason = '') {
+      this._readyState = CLOSED;
+      if (this.onclose) this.onclose({ code, reason });
     },
   };
   return socket;
@@ -87,6 +95,68 @@ describe('Relay resilience fixes (issue #7)', () => {
     await p;
     socket.sentMessages.length = 0;
   }
+
+  describe('connection-timeout race', () => {
+    it('discards a socket that arrives AFTER the connection timeout (no orphan relay)', async () => {
+      // Self-audit + Copilot review: createWebSocket can resolve
+      // after CONNECTION_TIMEOUT_MS has fired and the outer promise
+      // has rejected. Without the fix, the late-arriving socket
+      // would still register in this.relays, start a pingTimer,
+      // resubscribeAll, etc. — orphan resources the caller can't
+      // see (their connect() saw a rejection).
+      client = new NostrClient(keyManager, { pingIntervalMs: 0 });
+
+      // Pin the socket creation so it never resolves until we say.
+      let socketResolver!: (s: typeof socket) => void;
+      const pendingSocketPromise = new Promise<typeof socket>((res) => {
+        socketResolver = res;
+      });
+      mockCreateWebSocket.mockImplementation(() => pendingSocketPromise);
+
+      socket = createFakeSocket();
+      const connectPromise = client.connect('wss://slow.test');
+
+      // Advance past the connection timeout (30s default).
+      await vi.advanceTimersByTimeAsync(31_000);
+      await expect(connectPromise).rejects.toThrow(/timed out/);
+
+      // NOW the socket arrives. The .then guard must close it and
+      // skip registration.
+      socketResolver(socket);
+      await vi.advanceTimersByTimeAsync(0);
+      // The fake socket records close() calls via state; we assert
+      // it's CLOSED and that no relay was registered for the URL.
+      expect(socket._readyState).toBe(CLOSED);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const relays: Map<string, unknown> = (client as any).relays;
+      expect(relays.has('wss://slow.test')).toBe(false);
+    });
+
+    it('discards a socket whose onopen fires AFTER the timeout (defense in depth)', async () => {
+      // Even if createWebSocket resolves before the timeout, onopen
+      // can fire after — same orphan-relay concern. The onopen
+      // handler must check the timedOut flag too.
+      client = new NostrClient(keyManager, { pingIntervalMs: 0 });
+      socket = createFakeSocket();
+      mockCreateWebSocket.mockResolvedValue(socket);
+
+      const connectPromise = client.connect('wss://slow.test');
+      // Resolve createWebSocket but DON'T trigger onopen yet.
+      await vi.advanceTimersByTimeAsync(0);
+      // Advance past the connection timeout — outer promise rejects,
+      // and the timeout closes the still-pending socket.
+      await vi.advanceTimersByTimeAsync(31_000);
+      await expect(connectPromise).rejects.toThrow(/timed out/);
+
+      // Even if the socket somehow fires onopen later (e.g., the
+      // timeout's close() didn't take effect), the onopen guard
+      // must skip the registration.
+      socket._triggerOpen();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const relays: Map<string, unknown> = (client as any).relays;
+      expect(relays.has('wss://slow.test')).toBe(false);
+    });
+  });
 
   describe('ping filter scoping', () => {
     it('scopes the keepalive REQ to authors:[selfPubkey]', async () => {
@@ -423,6 +493,29 @@ describe('Relay resilience fixes (issue #7)', () => {
       // Now both relays are done → settle.
       const result = await pending;
       expect(result).toBeNull(); // no events delivered
+    });
+
+    it('relay disconnect mid-query triggers a re-check (no timeout wait)', async () => {
+      // Self-audit invariant + Copilot review: queryWithFirstSeenWins
+      // only re-evaluates allRelaysDoneFor when a listener callback
+      // (EOSE / CLOSED → onError) fires. If a relay drops the
+      // WebSocket without sending either, the query would otherwise
+      // hang until queryTimeoutMs even though the disconnected relay
+      // no longer counts toward pending relays. Fix: socket.onclose
+      // synthetically fires onError on every active sub.
+      await connect({ queryTimeoutMs: 60_000 });
+      const pending = client.queryPubkeyByNametag('alice');
+      // Verify the REQ went out so we know we're truly mid-query.
+      expect(socket.sentMessages.some((m) => m.includes('"REQ","sub_'))).toBe(true);
+
+      // Drop the socket without any EOSE/CLOSED — simulates a
+      // network blip. Without the fix, the query hangs to the 60s
+      // timeout. With the fix, onclose fires synthetic onError →
+      // listener re-checks allRelaysDoneFor → 0 connected → settle.
+      socket._triggerClose(1006, 'Network error');
+
+      const result = await pending;
+      expect(result).toBeNull();
     });
 
     it('disconnect() settles in-flight queries immediately (no full timeout wait)', async () => {
