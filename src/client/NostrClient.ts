@@ -397,6 +397,19 @@ export class NostrClient {
             relay.connected = false;
             this.stopPingTimer(url);
 
+            // Pre-onopen close: TCP handshake failure or relay
+            // immediately closed the WS during the upgrade. Without
+            // this, the connectToRelay promise stays pending until
+            // CONNECTION_TIMEOUT_MS (30s) expires; surfacing it now
+            // lets the caller see the failure promptly and retry.
+            if (!wasConnected && !timedOut) {
+              timedOut = true;
+              clearTimeout(timeoutId);
+              reject(new Error(
+                `Connection to ${url} closed during handshake: ${event?.reason || 'no reason'}`,
+              ));
+            }
+
             if (wasConnected) {
               const reason = event?.reason || 'Connection closed';
               this.emitConnectionEvent('disconnect', url, reason);
