@@ -25,10 +25,14 @@ jobs:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
-      # `npm install -g npm@latest` previously broke the publish step
-      # with `Cannot find module 'promise-retry'` (a regression in
-      # npm's bundled dep tree). Node 22 ships a working npm 10.x so
-      # the global upgrade is unnecessary.
+      # OIDC trusted publishing (configured on npmjs.com for this
+      # package) requires npm CLI ≥ 11.5. Node 22 ships with npm
+      # 10.x — too old. We pin to a known-working 11.x rather than
+      # `npm@latest` because some recent `latest` tarballs ship a
+      # broken bundled-dep tree (`Cannot find module 'promise-retry'`,
+      # see runs/25520859482).
+      - name: Pin npm to OIDC-capable version
+        run: npm install -g npm@11.5.2
 
       - name: Validate version format
         run: |
@@ -58,8 +62,24 @@ jobs:
             echo "tag=dev" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Publish to npm
-        run: npm publish --access public --tag ${{ steps.dist-tag.outputs.tag }}
+      - name: Publish to npm (OIDC trusted publishing)
+        # Trusted publishing flow:
+        #   1. The job's `id-token: write` permission lets GitHub
+        #      Actions mint an OIDC token bound to this workflow run.
+        #   2. npm CLI ≥ 11.5 trades that OIDC token for a short-lived
+        #      publish token at npmjs.com, which in turn checks the
+        #      configured trusted publisher (unicitynetwork/nostr-js-sdk
+        #      via .github/workflows/publish.yml) and approves.
+        #   3. `--provenance` attaches a build-attestation to the
+        #      published tarball — required when the npm side has
+        #      "Require 2FA or bypass-2fa token" enabled, since OIDC
+        #      with provenance is the way trusted publishing satisfies
+        #      that policy.
+        # We explicitly clear NODE_AUTH_TOKEN so npm doesn't fall back
+        # to legacy token auth (which would be rejected by the policy).
+        run: npm publish --access public --provenance --tag ${{ steps.dist-tag.outputs.tag }}
+        env:
+          NODE_AUTH_TOKEN: ''
 
       - name: Create git tag
         run: |
