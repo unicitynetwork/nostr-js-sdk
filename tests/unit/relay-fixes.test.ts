@@ -292,22 +292,18 @@ describe('Relay resilience fixes (issue #7)', () => {
       expect(reqs[1][2].kinds).toEqual([2]);
     });
 
-    it('clears BOTH closedSubIds and eosedSubIds before post-AUTH resubscribe', async () => {
-      // Self-audit invariant: pre-auth a relay may have either CLOSED
-      // (auth-required) or EOSE'd (returned 0 stored events because
-      // the filter was unsatisfiable without auth context) any
-      // active sub. Post-auth, BOTH markers must be cleared so the
-      // resubscribed REQ doesn't see a stale "done" state and so
-      // any in-flight queryWithFirstSeenWins re-checks
-      // allRelaysDoneFor against fresh state.
+    it('post-AUTH resubscribe clears eosedSubIds (re-arms stale-EOSE state)', async () => {
+      // Pre-auth a relay may have EOSE'd a sub with 0 stored events
+      // because the filter was unsatisfiable without auth context.
+      // Post-auth that's no longer true — the resubscribed REQ
+      // might match. We MUST re-arm the local "still waiting" state
+      // so any in-flight queryWithFirstSeenWins doesn't see this
+      // relay as already-done from a stale eosedSubIds marker.
       await connect();
       const subId = client.subscribe(Filter.builder().kinds(1).build(), { onEvent: vi.fn() });
 
-      // Relay marks the sub eosed (pre-auth empty result).
       socket._triggerMessage(JSON.stringify(['EOSE', subId]));
 
-      // AUTH challenge → SDK signs and replies, then schedules
-      // resubscribeAll after AUTH_RESUBSCRIBE_DELAY_MS.
       socket.sentMessages.length = 0;
       socket._triggerMessage(JSON.stringify(['AUTH', 'challenge-string']));
       await vi.advanceTimersByTimeAsync(5000);
@@ -315,6 +311,31 @@ describe('Relay resilience fixes (issue #7)', () => {
       // Post-AUTH: the previously-EOSE'd sub MUST be re-issued.
       const reissued = socket.sentMessages.find((m) => m.includes(`"REQ","${subId}"`));
       expect(reissued).toBeDefined();
+    });
+
+    it('post-AUTH resubscribe SKIPS terminally-rejected subs (rate-limit stays blocked)', async () => {
+      // Counterpart invariant. closedSubIds populated by terminal
+      // rejections (rate-limited, blocked, etc.) MUST persist across
+      // AUTH success — AUTH doesn't relax those rejections, and
+      // re-issuing them would just trigger the same rejection in a
+      // loop. Auth-required CLOSEDs aren't in this set in the first
+      // place (handleClosedMessage skips them as transient).
+      await connect();
+      const goodSubId = client.subscribe(Filter.builder().kinds(1).build(), { onEvent: vi.fn() });
+      const badSubId = client.subscribe(Filter.builder().kinds(2).build(), { onEvent: vi.fn() });
+
+      // Terminal rejection lands in closedSubIds.
+      socket._triggerMessage(JSON.stringify(['CLOSED', badSubId, 'rate-limited: too many']));
+
+      socket.sentMessages.length = 0;
+      socket._triggerMessage(JSON.stringify(['AUTH', 'challenge-string']));
+      await vi.advanceTimersByTimeAsync(5000);
+
+      // Post-AUTH: goodSubId IS re-issued; badSubId is NOT.
+      const goodReissued = socket.sentMessages.find((m) => m.includes(`"REQ","${goodSubId}"`));
+      const badReissued = socket.sentMessages.find((m) => m.includes(`"REQ","${badSubId}"`));
+      expect(goodReissued).toBeDefined();
+      expect(badReissued).toBeUndefined();
     });
 
     it('accepts truncated ["CLOSED", subId] frames with a default reason', async () => {

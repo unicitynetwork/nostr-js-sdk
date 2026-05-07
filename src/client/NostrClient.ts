@@ -737,18 +737,19 @@ export class NostrClient {
     // NIP-42 transient case: relays that require AUTH typically reject
     // pre-auth REQs with `CLOSED("auth-required:...")` and then send
     // an AUTH challenge. resubscribeAfterAuth re-issues the sub, so
-    // this rejection is NOT terminal. If we marked closedSubIds here:
-    //   1. queryWithFirstSeenWins.onError → allRelaysDoneFor → true
-    //      (single-relay case) → settles null + unsubscribes → the
-    //      sub is gone from the global Map by the time
-    //      resubscribeAfterAuth runs → no retry, query lost.
-    //   2. resubscribeAll on AUTH-success would skip this sub for
-    //      the brief window before resubscribeAfterAuth clears the
-    //      marker (hardened by the clear, but skip-then-clear is
-    //      fragile).
+    // this rejection is NOT terminal. If we marked closedSubIds here,
+    // queryWithFirstSeenWins.onError would settle the future
+    // prematurely (single-relay → allRelaysDoneFor=true), unsubscribe
+    // the sub, and the post-AUTH retry would find nothing to retry.
     // Listener still gets onError so callers see the reason; we just
     // don't poison the per-relay state with a transient marker.
-    const isAuthRequired = message.startsWith('auth-required:')
+    //
+    // We accept three on-the-wire shapes: `auth-required:...`
+    // (NIP-42 standard with reason), `auth-required ...` (whitespace
+    // separator), and bare `auth-required` (no suffix at all — some
+    // relays / tests).
+    const isAuthRequired = message === 'auth-required'
+        || message.startsWith('auth-required:')
         || message.startsWith('auth-required ');
 
     const relay = this.relays.get(relayUrl);
@@ -790,27 +791,26 @@ export class NostrClient {
     const message = JSON.stringify(['AUTH', authEvent.toJSON()]);
     relay.socket.send(message);
 
-    // Re-send subscriptions after auth (relay may have ignored pre-auth requests).
-    // Some relays respond to pre-auth REQs with `["CLOSED","<sub>","auth-required:..."]`,
-    // which lands in `relay.closedSubIds`. Once we've responded to the
-    // AUTH challenge, those subs are eligible for retry — so clear the
-    // marker for this relay before resubscribeAll runs. Permanent
-    // rejections (max_subscriptions, etc.) will simply be re-rejected
-    // and re-recorded; transient auth-required ones now succeed.
+    // Re-send subscriptions after auth (relay may have ignored pre-auth
+    // requests). Two separate per-relay markers, two separate decisions:
     //
-    // We also clear `eosedSubIds`: a relay may have EOSE'd a pre-auth
-    // sub (returning zero stored events because the filter wasn't
-    // satisfiable without auth context). Post-auth that's no longer
-    // true, and we MUST re-arm the local "still waiting" state for
-    // any in-flight queryWithFirstSeenWins — otherwise allRelaysDoneFor
-    // would see this relay as already-done from the stale marker and
-    // settle prematurely.
+    //  - `closedSubIds`: do NOT clear. handleClosedMessage already
+    //    skips the auth-required transient case, so anything in this
+    //    set is a TERMINAL rejection (rate-limited, blocked, etc.)
+    //    that AUTH does not relax. The resubscribeAll guard then
+    //    correctly skips terminal-rejected subs on this relay. They
+    //    will be retried on the next reconnect, when onopen creates a
+    //    fresh RelayConnection with empty markers.
+    //
+    //  - `eosedSubIds`: clear. A relay may have EOSE'd a pre-auth sub
+    //    with zero events (filter unsatisfiable without auth context);
+    //    post-auth the same filter might match. We must re-arm the
+    //    local "still waiting" state so any in-flight
+    //    queryWithFirstSeenWins doesn't see this relay as already-done
+    //    from a stale marker.
     setTimeout(() => {
       const r = this.relays.get(relayUrl);
-      if (r) {
-        r.closedSubIds.clear();
-        r.eosedSubIds.clear();
-      }
+      if (r) r.eosedSubIds.clear();
       this.resubscribeAll(relayUrl);
     }, AUTH_RESUBSCRIBE_DELAY_MS);
   }
