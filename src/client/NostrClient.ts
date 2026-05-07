@@ -645,9 +645,15 @@ export class NostrClient {
     // valid. Dropping such frames was exactly the leak this PR sets out
     // to fix — no closedSubIds marker and no onError notification means
     // queries hang until timeout and resubscribe loops persist.
-    if (json.length < 2) return;
+    if (json.length < 2 || typeof json[1] !== 'string') return;
 
-    const subscriptionId = json[1] as string;
+    const subscriptionId = json[1];
+    // Ignore CLOSED for sub_ids we don't know about. A misbehaving or
+    // malicious relay could otherwise spam us with arbitrary sub_ids
+    // and grow `closedSubIds` unbounded over a long-lived connection,
+    // and could pre-emptively block sub_ids we might use later.
+    if (!this.subscriptions.has(subscriptionId)) return;
+
     const message = typeof json[2] === 'string' ? json[2] : 'no reason provided';
 
     const relay = this.relays.get(relayUrl);
@@ -657,7 +663,11 @@ export class NostrClient {
 
     const subscription = this.subscriptions.get(subscriptionId);
     if (subscription?.listener.onError) {
-      subscription.listener.onError(subscriptionId, `Subscription closed: ${message}`);
+      // Pass the relay's reason through verbatim so callers can
+      // pattern-match on standard prefixes (`auth-required:`,
+      // `rate-limited:`, `blocked:`, etc.) without parsing through
+      // a wrapper string.
+      subscription.listener.onError(subscriptionId, message);
     }
   }
 
@@ -1159,13 +1169,28 @@ export class NostrClient {
           }
         },
         onEndOfStoredEvents: (id) => finishWith(pickWinner(), id),
-        // CLOSED frame from the relay (rate-limit, auth-required, etc.) is
-        // terminal for this subscription. Settle promptly with whatever we
-        // collected so far instead of waiting for the timeout. Without this
-        // a relay-side rejection looks identical to "no data exists".
+        // CLOSED frame from the relay (rate-limit, auth-required, etc.)
+        // is terminal for this sub *on the sending relay*. In a
+        // multi-relay client the same sub_id may still be alive on a
+        // healthy relay, so we must NOT settle on the first CLOSED —
+        // that would prematurely abort a query other relays could
+        // satisfy. Settle only when ALL connected relays have closed
+        // this sub (no chance of an EOSE-with-data anywhere).
+        // handleClosedMessage records the rejection on the sending
+        // relay's closedSubIds before calling onError, so by the time
+        // we get here we can decide by inspecting that state across
+        // all connected relays.
         onError: (id, message) => {
           console.warn(`Relay closed subscription ${id}: ${message}`);
-          finishWith(pickWinner(), id);
+          const allClosed = Array.from(this.relays.values())
+            .filter((r) => r.connected)
+            .every((r) => r.closedSubIds.has(id));
+          if (allClosed) {
+            finishWith(pickWinner(), id);
+          }
+          // else: keep waiting for EOSE from a healthy relay or the
+          // overall query timeout — no relay can stop the world for
+          // others.
         },
       });
     });
