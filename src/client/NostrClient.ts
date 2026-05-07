@@ -423,10 +423,12 @@ export class NostrClient {
               // longer counts toward "still pending" relays. Firing
               // a synthetic onError gives every active sub a chance
               // to re-evaluate now that the relay set has shrunk.
+              // Include the relay URL so listeners in a multi-relay
+              // client can attribute which relay dropped.
               const inflight = Array.from(this.subscriptions.entries());
               for (const [subId, sub] of inflight) {
                 try {
-                  sub.listener.onError?.(subId, `Relay disconnected: ${reason}`);
+                  sub.listener.onError?.(subId, `Relay disconnected (${url}): ${reason}`);
                 } catch {
                   // Ignore listener errors — we're notifying
                   // best-effort.
@@ -1197,6 +1199,15 @@ export class NostrClient {
       subscriptionId = `sub_${++this.subscriptionCounter}`;
       filter = filterOrSubId;
       listener = listenerOrFilter as NostrEventListener;
+    }
+
+    // Reserved prefix for SDK-internal sub_ids (currently just the
+    // keepalive `PING_SUB_ID`). Reject explicit caller use so the
+    // keepalive timer's CLOSE/REQ cycle can't stomp on user state.
+    if (subscriptionId.startsWith('__nostr-sdk-')) {
+      throw new Error(
+        `Subscription ID "${subscriptionId}" uses the reserved "__nostr-sdk-" prefix — pick a different id.`,
+      );
     }
 
     this.subscriptions.set(subscriptionId, { filter, listener });
