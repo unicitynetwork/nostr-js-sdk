@@ -1062,11 +1062,18 @@ export class NostrClient {
       let subscriptionId = '';
       let settled = false;
 
-      const finishWith = (result: T | null) => {
+      // Accept an explicit `id` so callers from inside the listener can
+      // pass the sub_id the relay echoed back. This guards against any
+      // future change to subscribe() that would invoke listener
+      // callbacks before its return value is bound to `subscriptionId`
+      // — the closure-captured value would still be `''` and we'd skip
+      // the CLOSE frame, leaking the slot on the relay.
+      const finishWith = (result: T | null, id?: string) => {
         if (settled) return;
         settled = true;
         clearTimeout(timeoutId);
-        if (subscriptionId) this.unsubscribe(subscriptionId);
+        const subId = id || subscriptionId;
+        if (subId) this.unsubscribe(subId);
         resolve(result);
       };
 
@@ -1105,14 +1112,14 @@ export class NostrClient {
             }
           }
         },
-        onEndOfStoredEvents: () => finishWith(pickWinner()),
+        onEndOfStoredEvents: (id) => finishWith(pickWinner(), id),
         // CLOSED frame from the relay (rate-limit, auth-required, etc.) is
         // terminal for this subscription. Settle promptly with whatever we
         // collected so far instead of waiting for the timeout. Without this
         // a relay-side rejection looks identical to "no data exists".
-        onError: (_subId, message) => {
-          console.warn(`Relay closed subscription ${_subId}: ${message}`);
-          finishWith(pickWinner());
+        onError: (id, message) => {
+          console.warn(`Relay closed subscription ${id}: ${message}`);
+          finishWith(pickWinner(), id);
         },
       });
     });
