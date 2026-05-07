@@ -2,9 +2,13 @@
  * Unit tests for the relay-resilience fixes covered by issue #7:
  *   1. The keepalive "ping" REQ filter must be scoped to authors:[self] so
  *      the relay does not stream a global live-tail through it after EOSE.
- *   2. A CLOSED frame from the relay must remove the subscription from the
- *      client-local map, so reconnect-resubscribe and AUTH-resubscribe do
- *      not re-issue the rejected REQ.
+ *   2. A CLOSED frame from the relay must surface to the listener via
+ *      onError and be recorded on the *sending* relay's closedSubIds, so
+ *      resubscribeAll / post-AUTH resubscribe skip it on that relay only.
+ *      The global subscriptions map is intentionally NOT modified —
+ *      multi-relay clients may still have the same sub_id alive on a
+ *      healthy relay; listener-driven unsubscribe() is what cleans the
+ *      global entry across all relays.
  *   3. queryWithFirstSeenWins (used by queryPubkeyByNametag /
  *      queryBindingByNametag / queryBindingByAddress) must settle promptly
  *      on a CLOSED frame instead of waiting for the full query timeout —
@@ -115,6 +119,24 @@ describe('Relay resilience fixes (issue #7)', () => {
   });
 
   describe('CLOSED frame handling', () => {
+    it('accepts truncated ["CLOSED", subId] frames with a default reason', async () => {
+      // NIP-01 makes the message field optional. The handler must
+      // notify the listener AND mark the sub closed on the sending
+      // relay even when the reason is missing — otherwise queries
+      // hang to timeout and resubscribe loops persist.
+      await connect();
+
+      const onError = vi.fn();
+      const subId = client.subscribe(Filter.builder().kinds(1).build(), {
+        onEvent: vi.fn(),
+        onError,
+      });
+
+      socket._triggerMessage(JSON.stringify(['CLOSED', subId])); // no reason
+
+      expect(onError).toHaveBeenCalledWith(subId, expect.stringContaining('no reason provided'));
+    });
+
     it('notifies the listener via onError and marks the sub closed on the sending relay', async () => {
       await connect();
 
