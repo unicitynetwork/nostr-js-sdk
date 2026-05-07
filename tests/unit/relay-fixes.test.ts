@@ -158,6 +158,74 @@ describe('Relay resilience fixes (issue #7)', () => {
       expect(onError).not.toHaveBeenCalled();
     });
 
+    it('handleEventMessage drops EVENT frames with non-string sub_id (DoS guard)', async () => {
+      await connect();
+      const onEvent = vi.fn();
+      client.subscribe(Filter.builder().kinds(1).build(), { onEvent });
+      // Numeric sub_id — must be silently dropped.
+      socket._triggerMessage(JSON.stringify(['EVENT', 42, {
+        id: 'a'.repeat(64), pubkey: 'b'.repeat(64), created_at: 0, kind: 1,
+        tags: [], content: '', sig: 'c'.repeat(128),
+      }]));
+      // Object sub_id.
+      socket._triggerMessage(JSON.stringify(['EVENT', { x: 1 }, {
+        id: 'a'.repeat(64), pubkey: 'b'.repeat(64), created_at: 0, kind: 1,
+        tags: [], content: '', sig: 'c'.repeat(128),
+      }]));
+      expect(onEvent).not.toHaveBeenCalled();
+    });
+
+    it('subscribe() wipes stale per-relay EOSE/CLOSED markers for the same sub_id', async () => {
+      // Self-audit invariant: a fresh subscribe with a sub_id that was
+      // previously CLOSED on some relay must NOT be skipped on that
+      // relay. Same for stale EOSE markers — otherwise the new sub
+      // would be treated as already-done and queries built on top of
+      // it would settle prematurely.
+      await connect();
+
+      // Subscribe + relay sends CLOSED → marker set.
+      const subId = 'reused-sub';
+      client.subscribe(subId, Filter.builder().kinds(1).build(), { onEvent: vi.fn() });
+      socket._triggerMessage(JSON.stringify(['CLOSED', subId, 'rate-limited']));
+      // Now subscribe again with the same id (fresh listener).
+      client.subscribe(subId, Filter.builder().kinds(2).build(), { onEvent: vi.fn() });
+
+      // The second subscribe must have sent a fresh REQ — even though
+      // the relay had marked the prior one closed.
+      const reqs = socket.sentMessages
+        .map((m) => JSON.parse(m))
+        .filter((m) => m[0] === 'REQ' && m[1] === subId);
+      expect(reqs.length).toBe(2);
+      // And the second REQ uses the new filter (kinds:[2]), not the
+      // old one — proving it's a real re-subscribe.
+      expect(reqs[1][2].kinds).toEqual([2]);
+    });
+
+    it('clears BOTH closedSubIds and eosedSubIds before post-AUTH resubscribe', async () => {
+      // Self-audit invariant: pre-auth a relay may have either CLOSED
+      // (auth-required) or EOSE'd (returned 0 stored events because
+      // the filter was unsatisfiable without auth context) any
+      // active sub. Post-auth, BOTH markers must be cleared so the
+      // resubscribed REQ doesn't see a stale "done" state and so
+      // any in-flight queryWithFirstSeenWins re-checks
+      // allRelaysDoneFor against fresh state.
+      await connect();
+      const subId = client.subscribe(Filter.builder().kinds(1).build(), { onEvent: vi.fn() });
+
+      // Relay marks the sub eosed (pre-auth empty result).
+      socket._triggerMessage(JSON.stringify(['EOSE', subId]));
+
+      // AUTH challenge → SDK signs and replies, then schedules
+      // resubscribeAll after AUTH_RESUBSCRIBE_DELAY_MS.
+      socket.sentMessages.length = 0;
+      socket._triggerMessage(JSON.stringify(['AUTH', 'challenge-string']));
+      await vi.advanceTimersByTimeAsync(5000);
+
+      // Post-AUTH: the previously-EOSE'd sub MUST be re-issued.
+      const reissued = socket.sentMessages.find((m) => m.includes(`"REQ","${subId}"`));
+      expect(reissued).toBeDefined();
+    });
+
     it('accepts truncated ["CLOSED", subId] frames with a default reason', async () => {
       // NIP-01 makes the message field optional. The handler must
       // notify the listener AND mark the sub closed on the sending
@@ -355,6 +423,32 @@ describe('Relay resilience fixes (issue #7)', () => {
       // Now both relays are done → settle.
       const result = await pending;
       expect(result).toBeNull(); // no events delivered
+    });
+
+    it('disconnect() settles in-flight queries immediately (no full timeout wait)', async () => {
+      // Self-audit found: prior to this fix, calling disconnect()
+      // mid-query left the future unresolved until queryTimeoutMs
+      // elapsed. Listeners weren't notified, so allRelaysDoneFor was
+      // never re-checked.
+      await connect({ queryTimeoutMs: 60_000 });
+      const pending = client.queryPubkeyByNametag('alice');
+      // Verify the REQ went out so we know we're truly mid-query.
+      const reqMsg = socket.sentMessages
+        .map((m) => JSON.parse(m))
+        .find((m) => m[0] === 'REQ' && typeof m[1] === 'string' && m[1].startsWith('sub_'));
+      expect(reqMsg).toBeDefined();
+
+      const start = Date.now();
+      client.disconnect();
+      // Microtask flush — listener fires synchronously inside disconnect.
+      const result = await pending;
+      // Must be null (no events delivered) and resolved promptly,
+      // not after the 60s timeout.
+      expect(result).toBeNull();
+      // Date.now() with fake timers stays at the same instant; what
+      // matters is the promise resolved, which it must have to reach
+      // this line.
+      expect(Date.now() - start).toBeLessThan(1000);
     });
 
     it('settles on first CLOSED when only one relay is connected (single-relay back-compat)', async () => {

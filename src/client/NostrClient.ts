@@ -279,12 +279,25 @@ export class NostrClient {
     }
 
     return new Promise((resolve, reject) => {
+      // `timedOut` is observed inside the createWebSocket .then below.
+      // Without it, a slow socket creation that resolves AFTER we've
+      // already rejected the outer promise would still register the
+      // socket in this.relays and start a pingTimer — orphan
+      // resources the caller can't see or clean up.
+      let timedOut = false;
       const timeoutId = setTimeout(() => {
+        timedOut = true;
         reject(new Error(`Connection to ${url} timed out`));
       }, CONNECTION_TIMEOUT_MS);
 
       createWebSocket(url)
         .then((socket) => {
+          if (timedOut) {
+            // Caller already saw the rejection. Discard the late
+            // socket so we don't leak it.
+            try { socket.close(1000, 'Connection setup timed out'); } catch { /* ignore */ }
+            return;
+          }
           const relay: RelayConnection = {
             url,
             socket,
@@ -568,9 +581,9 @@ export class NostrClient {
    * Handle EVENT message from relay.
    */
   private handleEventMessage(json: unknown[]): void {
-    if (json.length < 3) return;
+    if (json.length < 3 || typeof json[1] !== 'string') return;
 
-    const subscriptionId = json[1] as string;
+    const subscriptionId = json[1];
     const eventData = json[2];
 
     const subscription = this.subscriptions.get(subscriptionId);
@@ -721,9 +734,20 @@ export class NostrClient {
     // marker for this relay before resubscribeAll runs. Permanent
     // rejections (max_subscriptions, etc.) will simply be re-rejected
     // and re-recorded; transient auth-required ones now succeed.
+    //
+    // We also clear `eosedSubIds`: a relay may have EOSE'd a pre-auth
+    // sub (returning zero stored events because the filter wasn't
+    // satisfiable without auth context). Post-auth that's no longer
+    // true, and we MUST re-arm the local "still waiting" state for
+    // any in-flight queryWithFirstSeenWins — otherwise allRelaysDoneFor
+    // would see this relay as already-done from the stale marker and
+    // settle prematurely.
     setTimeout(() => {
       const r = this.relays.get(relayUrl);
-      if (r) r.closedSubIds.clear();
+      if (r) {
+        r.closedSubIds.clear();
+        r.eosedSubIds.clear();
+      }
       this.resubscribeAll(relayUrl);
     }, AUTH_RESUBSCRIBE_DELAY_MS);
   }
@@ -747,24 +771,41 @@ export class NostrClient {
     }
     this.eventQueue = [];
 
-    // Close all relay connections and clean up timers
+    // Close all relay connections and clean up timers. Mark every
+    // relay disconnected synchronously BEFORE we notify subscriptions
+    // below, so any listener that consults `allRelaysDoneFor` sees
+    // zero connected relays and settles immediately.
     for (const [url, relay] of this.relays) {
-      // Stop ping timer
+      relay.connected = false;
       if (relay.pingTimer) {
         clearInterval(relay.pingTimer);
         relay.pingTimer = null;
       }
-      // Stop reconnect timer
       if (relay.reconnectTimer) {
         clearTimeout(relay.reconnectTimer);
         relay.reconnectTimer = null;
       }
-      // Close socket
       if (relay.socket && relay.socket.readyState !== CLOSED) {
         relay.socket.close(1000, 'Client disconnected');
       }
       this.emitConnectionEvent('disconnect', url, 'Client disconnected');
     }
+
+    // Notify in-flight subscriptions that we're shutting down.
+    // queryWithFirstSeenWins.onError re-checks allRelaysDoneFor (now
+    // 0 connected → trivially true) and settles immediately, sparing
+    // callers the full queryTimeoutMs wait. Snapshot keys first
+    // because the listener may call unsubscribe(), which mutates
+    // this.subscriptions while we iterate.
+    const inflightSubs = Array.from(this.subscriptions.entries());
+    for (const [subId, sub] of inflightSubs) {
+      try {
+        sub.listener.onError?.(subId, 'Client disconnected');
+      } catch {
+        // Ignore listener errors — we're tearing down anyway.
+      }
+    }
+
     this.relays.clear();
     this.subscriptions.clear();
   }
