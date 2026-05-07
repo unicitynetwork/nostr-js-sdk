@@ -159,7 +159,17 @@ export class NostrClient {
 
   /**
    * Replace the key manager used for signing and encryption.
-   * The connection stays alive — only future AUTH responses and published events use the new key.
+   *
+   * The connection stays alive — but every operation that consults the
+   * key manager from this point on uses the new key, including:
+   *   - signing future published events,
+   *   - signing NIP-42 AUTH challenge responses,
+   *   - the `authors:[selfPubkey]` filter on the keepalive ping REQ
+   *     (computed each ping interval),
+   *   - any other code path that calls `getPublicKeyHex()` on the
+   *     stored manager.
+   *
+   * Existing in-flight subscriptions are not re-issued or re-keyed.
    * @param keyManager New key manager
    */
   setKeyManager(keyManager: NostrKeyManager): void {
@@ -671,8 +681,16 @@ export class NostrClient {
     const message = JSON.stringify(['AUTH', authEvent.toJSON()]);
     relay.socket.send(message);
 
-    // Re-send subscriptions after auth (relay may have ignored pre-auth requests)
+    // Re-send subscriptions after auth (relay may have ignored pre-auth requests).
+    // Some relays respond to pre-auth REQs with `["CLOSED","<sub>","auth-required:..."]`,
+    // which lands in `relay.closedSubIds`. Once we've responded to the
+    // AUTH challenge, those subs are eligible for retry — so clear the
+    // marker for this relay before resubscribeAll runs. Permanent
+    // rejections (max_subscriptions, etc.) will simply be re-rejected
+    // and re-recorded; transient auth-required ones now succeed.
     setTimeout(() => {
+      const r = this.relays.get(relayUrl);
+      if (r) r.closedSubIds.clear();
       this.resubscribeAll(relayUrl);
     }, AUTH_RESUBSCRIBE_DELAY_MS);
   }

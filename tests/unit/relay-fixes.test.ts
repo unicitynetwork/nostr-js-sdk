@@ -168,7 +168,14 @@ describe('Relay resilience fixes (issue #7)', () => {
       expect(onEvent).not.toHaveBeenCalled();
     });
 
-    it('does NOT replay a CLOSED-rejected sub on simulated post-AUTH resubscribe', async () => {
+    it('post-AUTH resubscribe RE-ISSUES previously CLOSED-rejected subs (NIP-42 auth-required)', async () => {
+      // NIP-42 flow: relay sends CLOSED("auth-required") for any
+      // pre-auth REQ, then on AUTH success the client must re-issue
+      // those REQs. The closedSubIds bookkeeping must NOT permanently
+      // skip them; it must be cleared in the post-AUTH resubscribe
+      // path. (The "regular" resubscribeAll on reconnect operates on
+      // a fresh socket with a fresh closedSubIds set, so that path is
+      // already covered by RelayConnection construction.)
       await connect();
 
       const subId = client.subscribe(Filter.builder().kinds(1).build(), {
@@ -179,20 +186,21 @@ describe('Relay resilience fixes (issue #7)', () => {
       // Initial REQ went out.
       expect(socket.sentMessages).toContain(reqFrame);
 
-      // Relay rejects.
-      socket._triggerMessage(JSON.stringify(['CLOSED', subId, 'error: auth-required']));
+      // Relay rejects pre-auth.
+      socket._triggerMessage(JSON.stringify(['CLOSED', subId, 'auth-required: please authenticate']));
 
-      // Simulate post-AUTH resubscribe by triggering an AUTH challenge —
-      // resubscribeAll runs after AUTH_RESUBSCRIBE_DELAY_MS. The rejected
-      // sub must NOT be re-issued *on this relay* (other healthy relays
-      // would still resubscribe it; that's covered by the per-relay
-      // closedSubIds tracking).
       socket.sentMessages.length = 0;
+
+      // AUTH challenge fires; the SDK signs and replies, then schedules
+      // resubscribeAll after AUTH_RESUBSCRIBE_DELAY_MS.
       socket._triggerMessage(JSON.stringify(['AUTH', 'challenge-string']));
       await vi.advanceTimersByTimeAsync(5000);
 
+      // The previously-rejected sub MUST be re-issued on this relay so
+      // post-auth flow can succeed. (Other healthy relays were never
+      // in the rejected state to begin with.)
       const reissued = socket.sentMessages.find((m) => m.includes(`"REQ","${subId}"`));
-      expect(reissued).toBeUndefined();
+      expect(reissued).toBeDefined();
     });
   });
 
