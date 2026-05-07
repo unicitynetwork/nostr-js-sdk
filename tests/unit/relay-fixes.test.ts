@@ -119,6 +119,45 @@ describe('Relay resilience fixes (issue #7)', () => {
   });
 
   describe('CLOSED frame handling', () => {
+    it('ignores CLOSED for unknown sub_ids (DoS guard)', async () => {
+      // A misbehaving or malicious relay can spam CLOSED frames for
+      // arbitrary sub_ids the client never subscribed to. Without a
+      // guard, those would each grow `closedSubIds` unbounded over a
+      // long-lived connection, and could pre-emptively block sub_ids
+      // we might use later.
+      await connect();
+
+      // Simulate the relay sending CLOSED for a sub we never
+      // registered. The handler must drop it silently — listener for
+      // a different (real) sub stays untouched, and a follow-up
+      // legitimate subscribe with that ID must work normally.
+      const onError = vi.fn();
+      socket._triggerMessage(JSON.stringify(['CLOSED', 'ghost-sub', 'error: rejected']));
+      expect(onError).not.toHaveBeenCalled();
+
+      // Subsequent legitimate subscribe with that same id is unaffected
+      // (the ID was never blocked).
+      const subId = client.subscribe(Filter.builder().kinds(1).build(), {
+        onEvent: vi.fn(),
+        onError,
+      });
+      // Now CLOSED with the real sub_id IS surfaced.
+      socket._triggerMessage(JSON.stringify(['CLOSED', subId, 'real-rejection']));
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(onError).toHaveBeenCalledWith(subId, expect.stringContaining('real-rejection'));
+    });
+
+    it('also ignores CLOSED frames where sub_id is non-string (defensive)', async () => {
+      await connect();
+      const onError = vi.fn();
+      client.subscribe(Filter.builder().kinds(1).build(), { onEvent: vi.fn(), onError });
+      // Malformed: numeric sub_id.
+      socket._triggerMessage(JSON.stringify(['CLOSED', 42, 'whatever']));
+      // Malformed: object sub_id.
+      socket._triggerMessage(JSON.stringify(['CLOSED', { x: 1 }, 'whatever']));
+      expect(onError).not.toHaveBeenCalled();
+    });
+
     it('accepts truncated ["CLOSED", subId] frames with a default reason', async () => {
       // NIP-01 makes the message field optional. The handler must
       // notify the listener AND mark the sub closed on the sending
