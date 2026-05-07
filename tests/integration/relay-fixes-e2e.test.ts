@@ -3,14 +3,15 @@
  * live testnet relay at wss://nostr-relay.testnet.unicity.network.
  *
  * Each test connects with a fresh keypair so it cannot collide with other
- * sessions and so the keepalive sub_id "ping" gets a deterministic
- * authors:[selfPubkey] filter.
+ * sessions and so the keepalive sub_id "__nostr-sdk-keepalive__" gets a
+ * deterministic authors:[selfPubkey] filter.
  *
- * These tests are skipped automatically by the default vitest config
- * (which excludes tests/integration/**); run them with
+ * The default vitest config excludes tests/integration/**, so these
+ * tests do NOT run via `npm test` / `npm run test:unit`. Run them with
+ * the integration config:
  *   npm run test:integration -- relay-fixes-e2e
  * or
- *   RELAY_URL=wss://other-relay vitest run tests/integration/relay-fixes-e2e.test.ts
+ *   RELAY_URL=wss://other-relay npm run test:integration -- relay-fixes-e2e
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
