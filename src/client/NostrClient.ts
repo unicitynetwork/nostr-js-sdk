@@ -279,14 +279,24 @@ export class NostrClient {
     }
 
     return new Promise((resolve, reject) => {
-      // `timedOut` is observed inside the createWebSocket .then below.
-      // Without it, a slow socket creation that resolves AFTER we've
-      // already rejected the outer promise would still register the
-      // socket in this.relays and start a pingTimer — orphan
-      // resources the caller can't see or clean up.
+      // The connection-setup timeout has three races to defend
+      // against:
+      //   A) createWebSocket resolves AFTER the timeout fired.
+      //   B) createWebSocket resolves BEFORE the timeout, but
+      //      `onopen` fires AFTER the timeout fired.
+      //   C) createWebSocket resolves and `onopen` fires BEFORE the
+      //      timeout (the success path).
+      // `pendingSocket` lets the timeout proactively close any
+      // socket that's already been created but hasn't fired
+      // `onopen` yet. The `timedOut` flag covers (A) inside `.then`
+      // and (B) inside `socket.onopen`.
       let timedOut = false;
+      let pendingSocket: IWebSocket | null = null;
       const timeoutId = setTimeout(() => {
         timedOut = true;
+        if (pendingSocket) {
+          try { pendingSocket.close(1000, 'Connection setup timed out'); } catch { /* ignore */ }
+        }
         reject(new Error(`Connection to ${url} timed out`));
       }, CONNECTION_TIMEOUT_MS);
 
@@ -298,6 +308,7 @@ export class NostrClient {
             try { socket.close(1000, 'Connection setup timed out'); } catch { /* ignore */ }
             return;
           }
+          pendingSocket = socket;
           const relay: RelayConnection = {
             url,
             socket,
@@ -317,6 +328,18 @@ export class NostrClient {
           };
 
           socket.onopen = () => {
+            // The `.then` block already guards against a socket
+            // arriving after the connection timeout, but the socket
+            // can also be created BEFORE the timeout while
+            // `onopen` fires AFTER the timeout has rejected the
+            // outer promise. Without this second guard we'd register
+            // the relay, start a pingTimer, and resubscribe — orphan
+            // background resources the caller can't see or clean up
+            // because their connect() call already saw a rejection.
+            if (timedOut) {
+              try { socket.close(1000, 'Connection setup timed out'); } catch { /* ignore */ }
+              return;
+            }
             clearTimeout(timeoutId);
             relay.connected = true;
             relay.reconnectAttempts = 0;  // Reset on successful connection
@@ -366,6 +389,25 @@ export class NostrClient {
             if (wasConnected) {
               const reason = event?.reason || 'Connection closed';
               this.emitConnectionEvent('disconnect', url, reason);
+
+              // Re-trigger the all-done check on every active sub.
+              // queryWithFirstSeenWins.allRelaysDoneFor only runs
+              // from listener callbacks (EOSE / CLOSED via onError);
+              // a socket that drops without sending either would
+              // otherwise leave the query hanging until
+              // queryTimeoutMs even though the disconnected relay no
+              // longer counts toward "still pending" relays. Firing
+              // a synthetic onError gives every active sub a chance
+              // to re-evaluate now that the relay set has shrunk.
+              const inflight = Array.from(this.subscriptions.entries());
+              for (const [subId, sub] of inflight) {
+                try {
+                  sub.listener.onError?.(subId, `Relay disconnected: ${reason}`);
+                } catch {
+                  // Ignore listener errors — we're notifying
+                  // best-effort.
+                }
+              }
             }
 
             if (!this.closed && this.autoReconnect && !relay.reconnecting) {
@@ -380,7 +422,11 @@ export class NostrClient {
             }
           };
 
-          this.relays.set(url, relay);
+          // Note: we do NOT register the relay in `this.relays` here —
+          // only after `onopen` fires successfully. Registering eagerly
+          // (before onopen) would leak the relay into the global map
+          // even when the connection setup times out and the caller's
+          // promise has already rejected.
         })
         .catch((error) => {
           clearTimeout(timeoutId);
