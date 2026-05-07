@@ -153,6 +153,22 @@ export class NostrClient {
   }
 
   /**
+   * Replace the key manager used for signing and encryption.
+   * The connection stays alive — only future AUTH responses and published events use the new key.
+   * @param keyManager New key manager
+   */
+  setKeyManager(keyManager: NostrKeyManager): void {
+    this.keyManager = keyManager;
+  }
+
+  /**
+   * Get the current key manager.
+   */
+  getKeyManager(): NostrKeyManager {
+    return this.keyManager;
+  }
+
+  /**
    * Add a connection event listener.
    * @param listener Listener for connection events
    */
@@ -199,14 +215,6 @@ export class NostrClient {
         // Ignore listener errors
       }
     }
-  }
-
-  /**
-   * Get the key manager.
-   * @returns The key manager instance
-   */
-  getKeyManager(): NostrKeyManager {
-    return this.keyManager;
   }
 
   /**
@@ -419,16 +427,25 @@ export class NostrClient {
         return;
       }
 
-      // Send a subscription request as a ping (relays respond with EOSE)
-      // Use a single fixed subscription ID per relay to avoid accumulating subscriptions
-      // Note: limit:1 is used because some relays don't respond to limit:0
+      // Send a subscription request as a ping (relays respond with EOSE).
+      // The filter MUST be tightly scoped — an open `{ limit: 1 }` filter
+      // with no kinds/authors/#p will, after EOSE, stream every event the
+      // relay receives (NIP-01 live tail), saturating the connection and
+      // exhausting per-connection subscription slots on busy relays.
+      // Scoping by `authors:[self]` keeps the live tail empty in practice
+      // (the relay would only forward our own future events).
       try {
         const pingSubId = `ping`;
+        const selfPubkey = this.keyManager.getPublicKeyHex();
         // First close any existing ping subscription to ensure we don't accumulate
         const closeMessage = JSON.stringify(['CLOSE', pingSubId]);
         relay.socket.send(closeMessage);
         // Then send the new ping request (limit:1 ensures relay sends EOSE)
-        const pingMessage = JSON.stringify(['REQ', pingSubId, { limit: 1 }]);
+        const pingMessage = JSON.stringify([
+          'REQ',
+          pingSubId,
+          { authors: [selfPubkey], limit: 1 },
+        ]);
         relay.socket.send(pingMessage);
         relay.unansweredPings++;
       } catch {
@@ -585,6 +602,16 @@ export class NostrClient {
 
   /**
    * Handle CLOSED message from relay (subscription closed by relay).
+   *
+   * NIP-01 CLOSED frames are terminal for the named subscription on the
+   * relay side. We must remove the entry from `this.subscriptions`
+   * immediately, otherwise:
+   *   - `resubscribeAll` (on reconnect) re-issues the REQ, triggering the
+   *     same rejection loop;
+   *   - `handleAuthMessage` post-AUTH resubscribe does the same;
+   *   - the entry leaks forever, and the caller silently waits for events
+   *     that will never arrive (typically misdiagnosed as "no data found"
+   *     after the query timeout fires).
    */
   private handleClosedMessage(json: unknown[]): void {
     if (json.length < 3) return;
@@ -593,6 +620,10 @@ export class NostrClient {
     const message = json[2] as string;
 
     const subscription = this.subscriptions.get(subscriptionId);
+    // Remove from the local map BEFORE notifying the listener so that any
+    // listener-driven follow-up (e.g. retry) starts from a clean slate.
+    this.subscriptions.delete(subscriptionId);
+
     if (subscription?.listener.onError) {
       subscription.listener.onError(subscriptionId, `Subscription closed: ${message}`);
     }
@@ -1029,13 +1060,33 @@ export class NostrClient {
   ): Promise<T | null> {
     return new Promise((resolve) => {
       let subscriptionId = '';
+      let settled = false;
 
-      const timeoutId = setTimeout(() => {
+      const finishWith = (result: T | null) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
         if (subscriptionId) this.unsubscribe(subscriptionId);
-        resolve(null);
-      }, this.queryTimeoutMs);
+        resolve(result);
+      };
+
+      const timeoutId = setTimeout(() => finishWith(null), this.queryTimeoutMs);
 
       const authors = new Map<string, { firstSeen: number; latestEvent: Event }>();
+
+      const pickWinner = (): T | null => {
+        let winnerEntry: { firstSeen: number; latestEvent: Event } | null = null;
+        let winnerPubkey = '';
+        for (const [pubkey, entry] of authors) {
+          if (!winnerEntry
+              || entry.firstSeen < winnerEntry.firstSeen
+              || (entry.firstSeen === winnerEntry.firstSeen && pubkey < winnerPubkey)) {
+            winnerEntry = entry;
+            winnerPubkey = pubkey;
+          }
+        }
+        return winnerEntry ? extractResult(winnerEntry.latestEvent) : null;
+      };
 
       subscriptionId = this.subscribe(filter, {
         onEvent: (event) => {
@@ -1054,22 +1105,14 @@ export class NostrClient {
             }
           }
         },
-        onEndOfStoredEvents: () => {
-          clearTimeout(timeoutId);
-          this.unsubscribe(subscriptionId);
-
-          let winnerEntry: { firstSeen: number; latestEvent: Event } | null = null;
-          let winnerPubkey = '';
-          for (const [pubkey, entry] of authors) {
-            if (!winnerEntry
-                || entry.firstSeen < winnerEntry.firstSeen
-                || (entry.firstSeen === winnerEntry.firstSeen && pubkey < winnerPubkey)) {
-              winnerEntry = entry;
-              winnerPubkey = pubkey;
-            }
-          }
-
-          resolve(winnerEntry ? extractResult(winnerEntry.latestEvent) : null);
+        onEndOfStoredEvents: () => finishWith(pickWinner()),
+        // CLOSED frame from the relay (rate-limit, auth-required, etc.) is
+        // terminal for this subscription. Settle promptly with whatever we
+        // collected so far instead of waiting for the timeout. Without this
+        // a relay-side rejection looks identical to "no data exists".
+        onError: (_subId, message) => {
+          console.warn(`Relay closed subscription ${_subId}: ${message}`);
+          finishWith(pickWinner());
         },
       });
     });

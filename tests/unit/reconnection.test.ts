@@ -211,14 +211,22 @@ describe('NostrClient Reconnection', () => {
       fakeSocket.sentMessages.length = 0;
     }
 
-    it('should send ping REQ at each interval', async () => {
+    it('should send ping REQ at each interval, scoped to self to avoid live-tail firehose', async () => {
       await connectClient();
 
       await vi.advanceTimersByTimeAsync(PING_INTERVAL);
       const pings = fakeSocket.sentMessages.filter(m => m.includes('"ping"'));
       expect(pings.length).toBe(2); // CLOSE ping + REQ ping
       expect(pings[0]).toBe(JSON.stringify(['CLOSE', 'ping']));
-      expect(pings[1]).toBe(JSON.stringify(['REQ', 'ping', { limit: 1 }]));
+      // The REQ filter MUST include `authors:[selfPubkey]` — otherwise after
+      // EOSE the relay streams every event it receives back through this sub
+      // (NIP-01 live tail), exhausting per-connection subscription slots and
+      // wasting bandwidth.
+      const reqFrame = JSON.parse(pings[1]);
+      expect(reqFrame[0]).toBe('REQ');
+      expect(reqFrame[1]).toBe('ping');
+      expect(reqFrame[2].authors).toEqual([keyManager.getPublicKeyHex()]);
+      expect(reqFrame[2].limit).toBe(1);
     });
 
     it('should close socket after 2 unanswered pings when relay is dead', async () => {
