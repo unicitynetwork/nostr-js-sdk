@@ -105,7 +105,7 @@ describe('E2E: relay resilience fixes (issue #7)', () => {
     (relay!.socket as any).onmessage = (e: { data: string }) => {
       try {
         const frame = JSON.parse(e.data);
-        if (Array.isArray(frame) && frame[0] === 'EVENT' && frame[1] === 'ping') {
+        if (Array.isArray(frame) && frame[0] === 'EVENT' && frame[1] === '__nostr-sdk-keepalive__') {
           pingEventCount++;
         }
       } catch { /* ignore */ }
@@ -119,11 +119,11 @@ describe('E2E: relay resilience fixes (issue #7)', () => {
 
     const pingReqFrame = sentFrames
       .map((m) => { try { return JSON.parse(m); } catch { return undefined; } })
-      .find((m) => Array.isArray(m) && m[0] === 'REQ' && m[1] === 'ping') as unknown[] | undefined;
+      .find((m) => Array.isArray(m) && m[0] === 'REQ' && m[1] === '__nostr-sdk-keepalive__') as unknown[] | undefined;
 
     expect(pingReqFrame).toBeDefined();
     expect(pingReqFrame![0]).toBe('REQ');
-    expect(pingReqFrame![1]).toBe('ping');
+    expect(pingReqFrame![1]).toBe('__nostr-sdk-keepalive__');
 
     const filter = pingReqFrame![2] as { authors?: string[]; limit?: number };
     expect(filter.authors).toBeDefined();

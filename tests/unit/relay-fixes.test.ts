@@ -174,7 +174,7 @@ describe('Relay resilience fixes (issue #7)', () => {
       await vi.advanceTimersByTimeAsync(15000);
       const reqFrame = socket.sentMessages
         .map((m) => JSON.parse(m))
-        .find((m) => m[0] === 'REQ' && m[1] === 'ping');
+        .find((m) => m[0] === 'REQ' && m[1] === '__nostr-sdk-keepalive__');
 
       expect(reqFrame).toBeDefined();
       expect(reqFrame[2]).toEqual({
@@ -189,7 +189,7 @@ describe('Relay resilience fixes (issue #7)', () => {
       await vi.advanceTimersByTimeAsync(15000);
       const pingFrames = socket.sentMessages
         .map((m) => JSON.parse(m))
-        .filter((m) => m[1] === 'ping');
+        .filter((m) => m[1] === '__nostr-sdk-keepalive__');
 
       expect(pingFrames.length).toBe(2);
       expect(pingFrames[0][0]).toBe('CLOSE');

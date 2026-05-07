@@ -36,6 +36,17 @@ const DEFAULT_MAX_RECONNECT_INTERVAL_MS = 30000;
 const DEFAULT_PING_INTERVAL_MS = 30000;
 
 /**
+ * Internal sub_id reserved for the keepalive REQ. Namespaced with a
+ * `__nostr-sdk-` prefix so that user code calling
+ * {@link NostrClient.subscribe} with an explicit `subscriptionId`
+ * cannot collide — a user choosing the literal `"ping"` would
+ * otherwise have their subscription forcibly CLOSE/REQ'd every
+ * ping interval. The leading `__` is a stable convention for
+ * "do not pick this name."
+ */
+const PING_SUB_ID = '__nostr-sdk-keepalive__';
+
+/**
  * Delay before resubscribing after NIP-42 authentication.
  * This gives the relay time to process the AUTH response before we send
  * subscription requests. Without this delay, some relays may still reject
@@ -520,15 +531,14 @@ export class NostrClient {
       // Scoping by `authors:[self]` keeps the live tail empty in practice
       // (the relay would only forward our own future events).
       try {
-        const pingSubId = `ping`;
         const selfPubkey = this.keyManager.getPublicKeyHex();
         // First close any existing ping subscription to ensure we don't accumulate
-        const closeMessage = JSON.stringify(['CLOSE', pingSubId]);
+        const closeMessage = JSON.stringify(['CLOSE', PING_SUB_ID]);
         relay.socket.send(closeMessage);
         // Then send the new ping request (limit:1 ensures relay sends EOSE)
         const pingMessage = JSON.stringify([
           'REQ',
-          pingSubId,
+          PING_SUB_ID,
           { authors: [selfPubkey], limit: 1 },
         ]);
         relay.socket.send(pingMessage);

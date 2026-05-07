@@ -215,16 +215,19 @@ describe('NostrClient Reconnection', () => {
       await connectClient();
 
       await vi.advanceTimersByTimeAsync(PING_INTERVAL);
-      const pings = fakeSocket.sentMessages.filter(m => m.includes('"ping"'));
-      expect(pings.length).toBe(2); // CLOSE ping + REQ ping
-      expect(pings[0]).toBe(JSON.stringify(['CLOSE', 'ping']));
+      // The keepalive uses an internal-namespaced sub_id so user
+      // code can't collide with it.
+      const pingSubId = '__nostr-sdk-keepalive__';
+      const pings = fakeSocket.sentMessages.filter(m => m.includes(JSON.stringify(pingSubId)));
+      expect(pings.length).toBe(2); // CLOSE + REQ
+      expect(pings[0]).toBe(JSON.stringify(['CLOSE', pingSubId]));
       // The REQ filter MUST include `authors:[selfPubkey]` — otherwise after
       // EOSE the relay streams every event it receives back through this sub
       // (NIP-01 live tail), exhausting per-connection subscription slots and
       // wasting bandwidth.
       const reqFrame = JSON.parse(pings[1]);
       expect(reqFrame[0]).toBe('REQ');
-      expect(reqFrame[1]).toBe('ping');
+      expect(reqFrame[1]).toBe(pingSubId);
       expect(reqFrame[2].authors).toEqual([keyManager.getPublicKeyHex()]);
       expect(reqFrame[2].limit).toBe(1);
     });
@@ -253,7 +256,7 @@ describe('NostrClient Reconnection', () => {
       for (let i = 0; i < 10; i++) {
         await vi.advanceTimersByTimeAsync(PING_INTERVAL);
         // Relay responds — resets unansweredPings and lastPongTime
-        fakeSocket._triggerMessage(JSON.stringify(['EOSE', 'ping']));
+        fakeSocket._triggerMessage(JSON.stringify(['EOSE', '__nostr-sdk-keepalive__']));
       }
 
       expect(fakeSocket.closeCalls.length).toBe(0);
@@ -288,7 +291,7 @@ describe('NostrClient Reconnection', () => {
       // Relay is alive for 5 cycles
       for (let i = 0; i < 5; i++) {
         await vi.advanceTimersByTimeAsync(PING_INTERVAL);
-        fakeSocket._triggerMessage(JSON.stringify(['EOSE', 'ping']));
+        fakeSocket._triggerMessage(JSON.stringify(['EOSE', '__nostr-sdk-keepalive__']));
       }
       expect(fakeSocket.closeCalls.length).toBe(0);
 
