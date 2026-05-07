@@ -110,6 +110,12 @@ interface RelayConnection {
   // rejected REQ. Per-relay (not global) because multi-relay clients
   // may have the same sub_id alive on a different healthy relay.
   closedSubIds: Set<string>;
+  // Sub_ids this specific relay has EOSE'd for us. Combined with
+  // closedSubIds, lets queryWithFirstSeenWins decide when ALL
+  // connected relays have finished (either streamed EOSE or rejected
+  // with CLOSED) so it doesn't settle early off a single fast relay
+  // while a slower one still has matching events to deliver.
+  eosedSubIds: Set<string>;
 }
 
 /**
@@ -294,6 +300,7 @@ export class NostrClient {
             // sub-slot accounting is fresh, so previously-rejected REQs
             // should be re-issued on the new socket.
             closedSubIds: new Set<string>(),
+            eosedSubIds: new Set<string>(),
           };
 
           socket.onopen = () => {
@@ -540,7 +547,7 @@ export class NostrClient {
           this.handleOkMessage(json);
           break;
         case 'EOSE':
-          this.handleEOSEMessage(json);
+          this.handleEOSEMessage(relayUrl, json);
           break;
         case 'NOTICE':
           this.handleNoticeMessage(json);
@@ -602,13 +609,25 @@ export class NostrClient {
 
   /**
    * Handle EOSE (End of Stored Events) message from relay.
+   *
+   * Records the per-relay EOSE marker (mirroring closedSubIds) so
+   * queryWithFirstSeenWins can decide when ALL connected relays have
+   * finished — either streamed EOSE or rejected with CLOSED — instead
+   * of settling off the first fast relay's EOSE while a slower relay
+   * is still about to deliver matching events.
    */
-  private handleEOSEMessage(json: unknown[]): void {
-    if (json.length < 2) return;
+  private handleEOSEMessage(relayUrl: string, json: unknown[]): void {
+    if (json.length < 2 || typeof json[1] !== 'string') return;
 
-    const subscriptionId = json[1] as string;
+    const subscriptionId = json[1];
+    if (!this.subscriptions.has(subscriptionId)) return;
+
+    const relay = this.relays.get(relayUrl);
+    if (relay) {
+      relay.eosedSubIds.add(subscriptionId);
+    }
+
     const subscription = this.subscriptions.get(subscriptionId);
-
     if (subscription?.listener.onEndOfStoredEvents) {
       subscription.listener.onEndOfStoredEvents(subscriptionId);
     }
@@ -1055,6 +1074,16 @@ export class NostrClient {
 
     this.subscriptions.set(subscriptionId, { filter, listener });
 
+    // Wipe any stale per-relay EOSE/CLOSED markers for this sub_id
+    // before issuing the REQ — otherwise a fresh subscribe with a
+    // sub_id that was previously CLOSED (or was just freshly
+    // EOSE'd) would be skipped or treated as "already done" on
+    // those relays.
+    for (const [, relay] of this.relays) {
+      relay.closedSubIds.delete(subscriptionId);
+      relay.eosedSubIds.delete(subscriptionId);
+    }
+
     // Send subscription request to all connected relays
     const message = JSON.stringify(['REQ', subscriptionId, filter.toJSON()]);
     for (const [, relay] of this.relays) {
@@ -1084,9 +1113,10 @@ export class NostrClient {
           && !relay.closedSubIds.has(subscriptionId)) {
         relay.socket.send(message);
       }
-      // Either way, drop the per-relay closed marker now that the
-      // sub is gone from the global map.
+      // Drop both per-relay markers now that the sub is gone from
+      // the global map.
       relay.closedSubIds.delete(subscriptionId);
+      relay.eosedSubIds.delete(subscriptionId);
     }
   }
 
@@ -1117,6 +1147,11 @@ export class NostrClient {
     return new Promise((resolve) => {
       let subscriptionId = '';
       let settled = false;
+      // Declared as `let` and initialized lazily so `finishWith` can be
+      // invoked before the setTimeout call below without hitting the
+      // TDZ on `clearTimeout(timeoutId)`. (The same comment on the
+      // listener anticipates synchronous-callback hypothetical paths.)
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
       // Accept an explicit `id` so callers from inside the listener can
       // pass the sub_id the relay echoed back. This guards against any
@@ -1127,15 +1162,17 @@ export class NostrClient {
       const finishWith = (result: T | null, id?: string) => {
         if (settled) return;
         settled = true;
-        clearTimeout(timeoutId);
+        if (timeoutId !== undefined) clearTimeout(timeoutId);
         const subId = id || subscriptionId;
         if (subId) this.unsubscribe(subId);
         resolve(result);
       };
 
-      const timeoutId = setTimeout(() => finishWith(null), this.queryTimeoutMs);
+      timeoutId = setTimeout(() => finishWith(null), this.queryTimeoutMs);
 
       const authors = new Map<string, { firstSeen: number; latestEvent: Event }>();
+
+      const allRelaysDone = (id: string): boolean => this.allRelaysDoneFor(id);
 
       const pickWinner = (): T | null => {
         let winnerEntry: { firstSeen: number; latestEvent: Event } | null = null;
@@ -1168,32 +1205,48 @@ export class NostrClient {
             }
           }
         },
-        onEndOfStoredEvents: (id) => finishWith(pickWinner(), id),
-        // CLOSED frame from the relay (rate-limit, auth-required, etc.)
-        // is terminal for this sub *on the sending relay*. In a
-        // multi-relay client the same sub_id may still be alive on a
-        // healthy relay, so we must NOT settle on the first CLOSED —
-        // that would prematurely abort a query other relays could
-        // satisfy. Settle only when ALL connected relays have closed
-        // this sub (no chance of an EOSE-with-data anywhere).
-        // handleClosedMessage records the rejection on the sending
-        // relay's closedSubIds before calling onError, so by the time
-        // we get here we can decide by inspecting that state across
-        // all connected relays.
-        onError: (id, message) => {
-          console.warn(`Relay closed subscription ${id}: ${message}`);
-          const allClosed = Array.from(this.relays.values())
-            .filter((r) => r.connected)
-            .every((r) => r.closedSubIds.has(id));
-          if (allClosed) {
+        // EOSE means *this relay* has finished delivering stored
+        // events. In a multi-relay client we must not settle yet — a
+        // slower relay may still be about to deliver matching events.
+        // Settle only when every connected relay has either EOSE'd
+        // OR CLOSED'd this sub. (Single-relay clients are unaffected:
+        // allDone is trivially true with one relay.)
+        onEndOfStoredEvents: (id) => {
+          if (allRelaysDone(id)) {
             finishWith(pickWinner(), id);
           }
-          // else: keep waiting for EOSE from a healthy relay or the
-          // overall query timeout — no relay can stop the world for
-          // others.
+        },
+        // CLOSED frame from the relay (rate-limit, auth-required,
+        // etc.) is terminal for this sub *on the sending relay*. Same
+        // logic: only settle when all connected relays have either
+        // EOSE'd or CLOSED'd. handleClosedMessage records the
+        // rejection on the sending relay's closedSubIds before
+        // calling onError, so we can inspect that state here.
+        onError: (id, message) => {
+          console.warn(`Relay closed subscription ${id}: ${message}`);
+          if (allRelaysDone(id)) {
+            finishWith(pickWinner(), id);
+          }
+          // else: keep waiting for EOSE / CLOSED from remaining
+          // relays or the overall query timeout — no single relay
+          // can stop the world for others.
         },
       });
     });
+  }
+
+  /**
+   * True if every currently-connected relay has finished delivering
+   * for the given sub_id (either EOSE'd or CLOSED'd it). Used by
+   * queryWithFirstSeenWins to coordinate multi-relay settlement.
+   */
+  private allRelaysDoneFor(subscriptionId: string): boolean {
+    const connected = Array.from(this.relays.values()).filter((r) => r.connected);
+    // No connected relays at all → nothing to wait for; settle.
+    if (connected.length === 0) return true;
+    return connected.every(
+      (r) => r.eosedSubIds.has(subscriptionId) || r.closedSubIds.has(subscriptionId),
+    );
   }
 
   /**
