@@ -114,11 +114,17 @@ describe('Relay resilience fixes (issue #7)', () => {
       mockCreateWebSocket.mockImplementation(() => pendingSocketPromise);
 
       socket = createFakeSocket();
-      const connectPromise = client.connect('wss://slow.test');
+      // Pre-attach a handler so the rejection that fires during
+      // `advanceTimersByTimeAsync` is observed immediately and
+      // doesn't briefly count as an "unhandled rejection" — Node
+      // (and CI) will fail the run otherwise.
+      const connectError = client.connect('wss://slow.test').catch((e) => e);
 
       // Advance past the connection timeout (30s default).
       await vi.advanceTimersByTimeAsync(31_000);
-      await expect(connectPromise).rejects.toThrow(/timed out/);
+      const err = await connectError;
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toMatch(/timed out/);
 
       // NOW the socket arrives. The .then guard must close it and
       // skip registration.
@@ -140,13 +146,16 @@ describe('Relay resilience fixes (issue #7)', () => {
       socket = createFakeSocket();
       mockCreateWebSocket.mockResolvedValue(socket);
 
-      const connectPromise = client.connect('wss://slow.test');
+      // Pre-attach handler — see comment in the previous test.
+      const connectError = client.connect('wss://slow.test').catch((e) => e);
       // Resolve createWebSocket but DON'T trigger onopen yet.
       await vi.advanceTimersByTimeAsync(0);
       // Advance past the connection timeout — outer promise rejects,
       // and the timeout closes the still-pending socket.
       await vi.advanceTimersByTimeAsync(31_000);
-      await expect(connectPromise).rejects.toThrow(/timed out/);
+      const err = await connectError;
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toMatch(/timed out/);
 
       // Even if the socket somehow fires onopen later (e.g., the
       // timeout's close() didn't take effect), the onopen guard
