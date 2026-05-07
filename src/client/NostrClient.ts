@@ -688,8 +688,25 @@ export class NostrClient {
 
     const message = typeof json[2] === 'string' ? json[2] : 'no reason provided';
 
+    // NIP-42 transient case: relays that require AUTH typically reject
+    // pre-auth REQs with `CLOSED("auth-required:...")` and then send
+    // an AUTH challenge. resubscribeAfterAuth re-issues the sub, so
+    // this rejection is NOT terminal. If we marked closedSubIds here:
+    //   1. queryWithFirstSeenWins.onError → allRelaysDoneFor → true
+    //      (single-relay case) → settles null + unsubscribes → the
+    //      sub is gone from the global Map by the time
+    //      resubscribeAfterAuth runs → no retry, query lost.
+    //   2. resubscribeAll on AUTH-success would skip this sub for
+    //      the brief window before resubscribeAfterAuth clears the
+    //      marker (hardened by the clear, but skip-then-clear is
+    //      fragile).
+    // Listener still gets onError so callers see the reason; we just
+    // don't poison the per-relay state with a transient marker.
+    const isAuthRequired = message.startsWith('auth-required:')
+        || message.startsWith('auth-required ');
+
     const relay = this.relays.get(relayUrl);
-    if (relay) {
+    if (relay && !isAuthRequired) {
       relay.closedSubIds.add(subscriptionId);
     }
 
