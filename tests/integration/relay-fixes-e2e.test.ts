@@ -16,9 +16,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { NostrClient } from '../../src/client/NostrClient.js';
 import { NostrKeyManager } from '../../src/NostrKeyManager.js';
-import { Filter } from '../../src/protocol/Filter.js';
-import * as EventKinds from '../../src/protocol/EventKinds.js';
-import WebSocket from 'ws';
 
 const RELAY_URL = process.env.RELAY_URL ?? 'wss://nostr-relay.testnet.unicity.network';
 // Known nametag with a published binding on testnet, used as a positive
