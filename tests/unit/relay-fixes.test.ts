@@ -138,6 +138,28 @@ describe('Relay resilience fixes (issue #7)', () => {
       expect(relays.has('wss://slow.test')).toBe(false);
     });
 
+    it('rejects the connect promise immediately on handshake close (no 30s wait)', async () => {
+      // If the WebSocket closes BEFORE onopen fires (TCP handshake
+      // failure, immediate WS reject during upgrade, etc.), the
+      // outer connectToRelay promise was previously left pending
+      // until CONNECTION_TIMEOUT_MS expired (30s). Now socket.onclose
+      // detects "never connected" and rejects promptly.
+      client = new NostrClient(keyManager, { pingIntervalMs: 0 });
+      socket = createFakeSocket();
+      mockCreateWebSocket.mockResolvedValue(socket);
+
+      const connectError = client.connect('wss://broken.test').catch((e) => e);
+      // Let createWebSocket resolve and handlers attach.
+      await vi.advanceTimersByTimeAsync(0);
+      // Simulate handshake failure — close fires before onopen.
+      socket._triggerClose(1006, 'tcp reset');
+
+      // Must reject promptly, NOT wait the 30s connection timeout.
+      const err = await connectError;
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toMatch(/closed during handshake/);
+    });
+
     it('discards a socket whose onopen fires AFTER the timeout (defense in depth)', async () => {
       // Even if createWebSocket resolves before the timeout, onopen
       // can fire after — same orphan-relay concern. The onopen
