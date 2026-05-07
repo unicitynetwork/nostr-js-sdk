@@ -83,6 +83,14 @@ describe('E2E: relay resilience fixes (issue #7)', () => {
     const relay = relays.get(RELAY_URL);
     expect(relay).toBeDefined();
 
+    // Wrap BOTH socket.send (to capture the ping REQ shape) AND
+    // socket.onmessage (to count any incoming live-tail EVENTs)
+    // BEFORE waiting for any ping cycles. The previous version
+    // installed the onmessage wrapper after the first 2.5s wait —
+    // a buggy `{limit:1}` filter would send live-tail events
+    // immediately after the first REQ/EOSE round-trip and those
+    // would land before the wrapper was attached, giving a false
+    // negative.
     const sentFrames: string[] = [];
     const origSend = relay!.socket.send.bind(relay!.socket);
     relay!.socket.send = (msg: string) => {
@@ -90,30 +98,24 @@ describe('E2E: relay resilience fixes (issue #7)', () => {
       return origSend(msg);
     };
 
-    // Wait for at least one ping cycle (pingIntervalMs is 2000, so 2.5s
-    // gives one tick comfortably even under timer skew).
-    await new Promise((r) => setTimeout(r, 2500));
-
-    // Also count any incoming events on sub_id "ping" — if the live tail
-    // is firehose'd, we'll see them within this window.
     let pingEventCount = 0;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const onmessage = (relay!.socket as any).onmessage as ((e: { data: string }) => void) | null;
-    if (onmessage) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (relay!.socket as any).onmessage = (e: { data: string }) => {
-        try {
-          const frame = JSON.parse(e.data);
-          if (Array.isArray(frame) && frame[0] === 'EVENT' && frame[1] === 'ping') {
-            pingEventCount++;
-          }
-        } catch { /* ignore */ }
-        onmessage(e);
-      };
-    }
-    // Wait another full ping cycle so we actually have a chance to
-    // receive the live-tail firehose if it were broken.
-    await new Promise((r) => setTimeout(r, 2500));
+    const origOnMessage = (relay!.socket as any).onmessage as ((e: { data: string }) => void) | null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (relay!.socket as any).onmessage = (e: { data: string }) => {
+      try {
+        const frame = JSON.parse(e.data);
+        if (Array.isArray(frame) && frame[0] === 'EVENT' && frame[1] === 'ping') {
+          pingEventCount++;
+        }
+      } catch { /* ignore */ }
+      if (origOnMessage) origOnMessage(e);
+    };
+
+    // Now wait long enough for at least two ping cycles (pingIntervalMs
+    // = 2000) to see both the send-side REQ shape AND any incoming
+    // live-tail traffic on the "ping" sub.
+    await new Promise((r) => setTimeout(r, 5000));
 
     const pingReqFrame = sentFrames
       .map((m) => { try { return JSON.parse(m); } catch { return undefined; } })

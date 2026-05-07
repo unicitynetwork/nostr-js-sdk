@@ -1320,20 +1320,28 @@ export class NostrClient {
             finishWith(pickWinner(), id);
           }
         },
-        // CLOSED frame from the relay (rate-limit, auth-required,
-        // etc.) is terminal for this sub *on the sending relay*. Same
-        // logic: only settle when all connected relays have either
-        // EOSE'd or CLOSED'd. handleClosedMessage records the
-        // rejection on the sending relay's closedSubIds before
-        // calling onError, so we can inspect that state here.
+        // Subscription error from the SDK — fires from three paths
+        // that all need the same "is it time to settle?" check:
+        //   1. Relay sent CLOSED for this sub. In a multi-relay
+        //      client the same sub_id may still be alive on a
+        //      healthy relay; settling on the first CLOSED would
+        //      prematurely abort a query other relays could
+        //      satisfy. handleClosedMessage records the rejection
+        //      on the sending relay's closedSubIds before invoking
+        //      us, so we can decide via allRelaysDoneFor.
+        //   2. Relay disconnected mid-query (socket.onclose →
+        //      synthetic onError). The relay no longer counts as
+        //      connected, so allRelaysDoneFor excludes it.
+        //   3. Client disconnected (disconnect() → synthetic
+        //      onError). All relays are torn down, allRelaysDoneFor
+        //      sees zero connected and settles.
         onError: (id, message) => {
-          console.warn(`Relay closed subscription ${id}: ${message}`);
+          console.warn(`Subscription error on ${id}: ${message}`);
           if (allRelaysDone(id)) {
             finishWith(pickWinner(), id);
           }
           // else: keep waiting for EOSE / CLOSED from remaining
-          // relays or the overall query timeout — no single relay
-          // can stop the world for others.
+          // relays or the overall query timeout.
         },
       });
     });
