@@ -559,6 +559,36 @@ describe('Relay resilience fixes (issue #7)', () => {
       expect(result).toBeNull(); // no events delivered
     });
 
+    it('subscribe() rejects reserved __nostr-sdk- sub_ids', async () => {
+      // Keep user code from accidentally colliding with the
+      // keepalive timer's reserved sub_id (PING_SUB_ID).
+      await connect();
+      expect(() => client.subscribe('__nostr-sdk-keepalive__', Filter.builder().kinds(1).build(), {
+        onEvent: vi.fn(),
+      })).toThrow(/reserved.*__nostr-sdk-/);
+      // Other namespaces are fine.
+      expect(() => client.subscribe('my-app-sub', Filter.builder().kinds(1).build(), {
+        onEvent: vi.fn(),
+      })).not.toThrow();
+    });
+
+    it('relay-disconnect onError includes the relay URL (multi-relay attribution)', async () => {
+      // In a multi-relay client a bare "Relay disconnected: ..."
+      // message doesn't tell the listener which relay dropped.
+      // The URL must be in the message.
+      await connect();
+      const onError = vi.fn();
+      client.subscribe(Filter.builder().kinds(1).build(), {
+        onEvent: vi.fn(),
+        onError,
+      });
+      socket._triggerClose(1006, 'eof');
+      expect(onError).toHaveBeenCalled();
+      const arg = onError.mock.calls[0][1] as string;
+      expect(arg).toContain('Relay disconnected');
+      expect(arg).toContain('wss://relay.test');
+    });
+
     it('relay disconnect mid-query triggers a re-check (no timeout wait)', async () => {
       // Self-audit invariant + Copilot review: queryWithFirstSeenWins
       // only re-evaluates allRelaysDoneFor when a listener callback
