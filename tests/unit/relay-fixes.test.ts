@@ -451,6 +451,49 @@ describe('Relay resilience fixes (issue #7)', () => {
       expect(Date.now() - start).toBeLessThan(1000);
     });
 
+    it('does NOT settle on auth-required CLOSED — leaves the sub in the global Map for post-AUTH retry', async () => {
+      // NIP-42 transient case. Pre-auth relays typically reject REQs
+      // with `CLOSED("auth-required:...")` then immediately send an
+      // AUTH challenge. resubscribeAfterAuth re-issues the sub —
+      // but if we mark closedSubIds and the query settles + calls
+      // unsubscribe, the sub is gone from the global Map by the
+      // time resubscribe runs, and the query is permanently lost.
+      // The fix: skip adding to closedSubIds for auth-required
+      // rejections; listener still notified, but no settle.
+      await connect({ queryTimeoutMs: 60_000 });
+
+      const pending = client.queryPubkeyByNametag('alice');
+      const reqMsg = socket.sentMessages
+        .map((m) => JSON.parse(m))
+        .find((m) => m[0] === 'REQ' && typeof m[1] === 'string' && m[1].startsWith('sub_'));
+      const subId: string = reqMsg[1];
+
+      // Relay rejects pre-auth.
+      socket._triggerMessage(JSON.stringify(['CLOSED', subId, 'auth-required: please authenticate']));
+      await vi.advanceTimersByTimeAsync(10);
+
+      // Promise must NOT have settled — auth retry might still
+      // produce events.
+      let settled = false;
+      pending.then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(10);
+      expect(settled).toBe(false);
+
+      // The sub MUST still be registered in the global Map so that
+      // resubscribeAfterAuth can find it and re-issue the REQ.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const subs: Map<string, unknown> = (client as any).subscriptions;
+      expect(subs.has(subId)).toBe(true);
+
+      // Now the relay sends AUTH challenge → SDK signs and replies →
+      // resubscribeAfterAuth fires after the delay → REQ re-issued.
+      socket.sentMessages.length = 0;
+      socket._triggerMessage(JSON.stringify(['AUTH', 'challenge-string']));
+      await vi.advanceTimersByTimeAsync(5000);
+      const reissued = socket.sentMessages.find((m) => m.includes(`"REQ","${subId}"`));
+      expect(reissued).toBeDefined();
+    });
+
     it('settles on first CLOSED when only one relay is connected (single-relay back-compat)', async () => {
       // The new "wait for all" rule degenerates to "wait for the only
       // one" with a single relay, so single-relay clients see no
