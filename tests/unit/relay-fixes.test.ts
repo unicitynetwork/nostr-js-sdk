@@ -307,4 +307,69 @@ describe('Relay resilience fixes (issue #7)', () => {
       expect(await pending).toBeNull();
     });
   });
+
+  describe('multi-relay query: settle only when all relays are done', () => {
+    it('does NOT settle on first EOSE when a second relay is still streaming', async () => {
+      // Two fake sockets — one fast EOSE, one slow with matching events.
+      const socketA = createFakeSocket();
+      const socketB = createFakeSocket();
+      mockCreateWebSocket.mockResolvedValueOnce(socketA);
+      mockCreateWebSocket.mockResolvedValueOnce(socketB);
+
+      client = new NostrClient(keyManager, {
+        pingIntervalMs: 0,
+        queryTimeoutMs: 60_000,
+      });
+      const cp = Promise.all([
+        client.connect('wss://a.test'),
+        client.connect('wss://b.test'),
+      ]);
+      await vi.advanceTimersByTimeAsync(0);
+      socketA._triggerOpen();
+      socketB._triggerOpen();
+      await cp;
+
+      const pending = client.queryPubkeyByNametag('alice');
+
+      // Find the sub_id from socketA's REQ frame (both got the same id).
+      const reqA = socketA.sentMessages
+        .map((m) => JSON.parse(m))
+        .find((m) => m[0] === 'REQ' && typeof m[1] === 'string' && m[1].startsWith('sub_'));
+      const subId: string = reqA[1];
+
+      // Relay A finishes immediately with no events.
+      socketA._triggerMessage(JSON.stringify(['EOSE', subId]));
+      await vi.advanceTimersByTimeAsync(10);
+      // Promise must NOT resolve yet — relay B hasn't reported.
+      let settled = false;
+      pending.then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(10);
+      expect(settled).toBe(false);
+
+      // Relay B then delivers a matching event followed by EOSE.
+      // We need a real signed event for verify() to pass; for this
+      // test we just need the future to settle on EOSE — events
+      // missing valid signatures are dropped silently.
+      socketB._triggerMessage(JSON.stringify(['EOSE', subId]));
+      await vi.advanceTimersByTimeAsync(10);
+      // Now both relays are done → settle.
+      const result = await pending;
+      expect(result).toBeNull(); // no events delivered
+    });
+
+    it('settles on first CLOSED when only one relay is connected (single-relay back-compat)', async () => {
+      // The new "wait for all" rule degenerates to "wait for the only
+      // one" with a single relay, so single-relay clients see no
+      // behavior change.
+      await connect({ queryTimeoutMs: 60_000 });
+      const pending = client.queryPubkeyByNametag('alice');
+      const reqMsg = socket.sentMessages
+        .map((m) => JSON.parse(m))
+        .find((m) => m[0] === 'REQ' && typeof m[1] === 'string' && m[1].startsWith('sub_'));
+      const subId: string = reqMsg[1];
+      socket._triggerMessage(JSON.stringify(['CLOSED', subId, 'rate-limited']));
+      await vi.advanceTimersByTimeAsync(10);
+      expect(await pending).toBeNull();
+    });
+  });
 });
