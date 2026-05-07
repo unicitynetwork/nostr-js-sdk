@@ -105,6 +105,11 @@ interface RelayConnection {
   lastPongTime: number;
   unansweredPings: number;
   wasConnected: boolean;  // Track if this relay was previously connected (for reconnect vs initial connect)
+  // Sub_ids this specific relay has CLOSED for us. Used to skip them in
+  // resubscribeAll / post-AUTH resubscribe so we don't loop on a
+  // rejected REQ. Per-relay (not global) because multi-relay clients
+  // may have the same sub_id alive on a different healthy relay.
+  closedSubIds: Set<string>;
 }
 
 /**
@@ -275,6 +280,10 @@ export class NostrClient {
             lastPongTime: Date.now(),
             unansweredPings: 0,
             wasConnected: existingRelay?.wasConnected ?? false,
+            // Reset on every new connection: a relay's per-connection
+            // sub-slot accounting is fresh, so previously-rejected REQs
+            // should be re-issued on the new socket.
+            closedSubIds: new Set<string>(),
           };
 
           socket.onopen = () => {
@@ -480,6 +489,10 @@ export class NostrClient {
     if (!relay?.socket || !relay.connected) return;
 
     for (const [subId, info] of this.subscriptions) {
+      // Skip subs this relay has previously CLOSED — re-issuing them
+      // just triggers the same rejection in a loop. Other healthy
+      // relays still resubscribe.
+      if (relay.closedSubIds.has(subId)) continue;
       const message = JSON.stringify(['REQ', subId, info.filter.toJSON()]);
       relay.socket.send(message);
     }
@@ -502,7 +515,7 @@ export class NostrClient {
   /**
    * Handle a message from a relay.
    */
-  private handleRelayMessage(_url: string, message: string): void {
+  private handleRelayMessage(relayUrl: string, message: string): void {
     try {
       const json = JSON.parse(message) as unknown[];
       if (!Array.isArray(json) || json.length < 2) return;
@@ -523,10 +536,10 @@ export class NostrClient {
           this.handleNoticeMessage(json);
           break;
         case 'CLOSED':
-          this.handleClosedMessage(json);
+          this.handleClosedMessage(relayUrl, json);
           break;
         case 'AUTH':
-          this.handleAuthMessage(_url, json);
+          this.handleAuthMessage(relayUrl, json);
           break;
       }
     } catch {
@@ -603,27 +616,32 @@ export class NostrClient {
   /**
    * Handle CLOSED message from relay (subscription closed by relay).
    *
-   * NIP-01 CLOSED frames are terminal for the named subscription on the
-   * relay side. We must remove the entry from `this.subscriptions`
-   * immediately, otherwise:
-   *   - `resubscribeAll` (on reconnect) re-issues the REQ, triggering the
-   *     same rejection loop;
-   *   - `handleAuthMessage` post-AUTH resubscribe does the same;
-   *   - the entry leaks forever, and the caller silently waits for events
-   *     that will never arrive (typically misdiagnosed as "no data found"
-   *     after the query timeout fires).
+   * NIP-01 CLOSED frames are terminal for the named subscription **on
+   * the sending relay**. In a multi-relay client the same sub_id may
+   * still be alive on a healthy relay, so we must NOT delete the
+   * global `this.subscriptions` entry here — that would silently drop
+   * EVENT/EOSE frames from the still-healthy relays in
+   * `handleEventMessage` (which consults the global map).
+   *
+   * Instead we record the rejection on the sending relay's
+   * `closedSubIds` set so `resubscribeAll` and post-AUTH resubscribe
+   * skip it on this relay only. The listener is notified via
+   * `onError` so callers (e.g. queryWithFirstSeenWins) can decide to
+   * settle and explicitly `unsubscribe()` if they want to give up
+   * across all relays.
    */
-  private handleClosedMessage(json: unknown[]): void {
+  private handleClosedMessage(relayUrl: string, json: unknown[]): void {
     if (json.length < 3) return;
 
     const subscriptionId = json[1] as string;
     const message = json[2] as string;
 
-    const subscription = this.subscriptions.get(subscriptionId);
-    // Remove from the local map BEFORE notifying the listener so that any
-    // listener-driven follow-up (e.g. retry) starts from a clean slate.
-    this.subscriptions.delete(subscriptionId);
+    const relay = this.relays.get(relayUrl);
+    if (relay) {
+      relay.closedSubIds.add(subscriptionId);
+    }
 
+    const subscription = this.subscriptions.get(subscriptionId);
     if (subscription?.listener.onError) {
       subscription.listener.onError(subscriptionId, `Subscription closed: ${message}`);
     }
@@ -1025,12 +1043,18 @@ export class NostrClient {
 
     this.subscriptions.delete(subscriptionId);
 
-    // Send CLOSE to all connected relays
+    // Send CLOSE to all connected relays — except those that already
+    // CLOSED the sub themselves (no point telling the relay something
+    // it told us).
     const message = JSON.stringify(['CLOSE', subscriptionId]);
     for (const [, relay] of this.relays) {
-      if (relay.connected && relay.socket?.readyState === OPEN) {
+      if (relay.connected && relay.socket?.readyState === OPEN
+          && !relay.closedSubIds.has(subscriptionId)) {
         relay.socket.send(message);
       }
+      // Either way, drop the per-relay closed marker now that the
+      // sub is gone from the global map.
+      relay.closedSubIds.delete(subscriptionId);
     }
   }
 

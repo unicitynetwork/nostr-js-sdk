@@ -115,39 +115,57 @@ describe('Relay resilience fixes (issue #7)', () => {
   });
 
   describe('CLOSED frame handling', () => {
-    it('removes the subscription from the client-local map on CLOSED', async () => {
+    it('notifies the listener via onError and marks the sub closed on the sending relay', async () => {
       await connect();
 
       const onError = vi.fn();
+      const onEvent = vi.fn();
       const subId = client.subscribe(Filter.builder().kinds(1).build(), {
-        onEvent: vi.fn(),
+        onEvent,
         onError,
       });
 
-      // Verify the REQ was sent.
+      // The REQ was sent.
       expect(socket.sentMessages.some((m) => m.includes(`"REQ","${subId}"`))).toBe(true);
 
-      // Relay rejects with CLOSED (this is what nostr-rs-relay emits when
+      // Relay rejects with CLOSED (what nostr-rs-relay emits when
       // max_subscriptions is hit).
       socket._triggerMessage(JSON.stringify(['CLOSED', subId, 'error: rate-limited: too many concurrent REQs']));
 
-      // The listener is notified.
+      // Listener is notified with the relay's reason.
       expect(onError).toHaveBeenCalledWith(subId, expect.stringContaining('rate-limited'));
 
-      // The Map entry is gone — proven by the fact that a follow-up
-      // EVENT for that sub_id is silently dropped (no listener invocation).
-      // We verify by sending an EVENT and asserting onError isn't called
-      // a second time (the original onEvent handler also wouldn't fire,
-      // but easier to assert what *didn't* happen via call counts).
-      const onEventLater = vi.fn();
-      // Re-subscribe with the same sub_id to prove the slot was freed in
-      // the local map; subscribe assigns a new auto-generated sub_id, so
-      // we're really testing that `subscriptions.has(oldSubId)` is false.
-      client.unsubscribe(subId);   // should be a no-op now — no CLOSE frame emitted
-      const sentBefore = socket.sentMessages.length;
-      client.unsubscribe(subId);
-      expect(socket.sentMessages.length).toBe(sentBefore);
-      expect(onEventLater).not.toHaveBeenCalled();
+      // The sub_id is recorded on the relay's closedSubIds set so that
+      // reconnect / post-AUTH resubscribe skip it. We assert via the
+      // observable behavior in the next two tests rather than reaching
+      // into private state here.
+    });
+
+    it('drops EVENT frames after CLOSED in single-relay setup (no listener invocations)', async () => {
+      // Single-relay clients are the common case in the wild. With the
+      // sub still in the global map (so multi-relay tails keep working),
+      // we still need to make sure that an unsubscribe() called by the
+      // listener via onError actually empties the map — otherwise stale
+      // events keep arriving.
+      await connect();
+
+      const onError = vi.fn((subId: string) => client.unsubscribe(subId));
+      const onEvent = vi.fn();
+      const subId = client.subscribe(Filter.builder().kinds(1).build(), {
+        onEvent,
+        onError,
+      });
+
+      socket._triggerMessage(JSON.stringify(['CLOSED', subId, 'error: rate-limited']));
+      expect(onError).toHaveBeenCalledTimes(1);
+
+      // After the listener-driven unsubscribe(), a follow-up EVENT for
+      // the same sub_id must NOT fire onEvent.
+      socket._triggerMessage(JSON.stringify(['EVENT', subId, {
+        id: 'a'.repeat(64), pubkey: 'b'.repeat(64), created_at: 0, kind: 1,
+        tags: [], content: '', sig: 'c'.repeat(128),
+      }]));
+      expect(onEvent).not.toHaveBeenCalled();
     });
 
     it('does NOT replay a CLOSED-rejected sub on simulated post-AUTH resubscribe', async () => {
@@ -166,7 +184,9 @@ describe('Relay resilience fixes (issue #7)', () => {
 
       // Simulate post-AUTH resubscribe by triggering an AUTH challenge —
       // resubscribeAll runs after AUTH_RESUBSCRIBE_DELAY_MS. The rejected
-      // sub must NOT be re-issued.
+      // sub must NOT be re-issued *on this relay* (other healthy relays
+      // would still resubscribe it; that's covered by the per-relay
+      // closedSubIds tracking).
       socket.sentMessages.length = 0;
       socket._triggerMessage(JSON.stringify(['AUTH', 'challenge-string']));
       await vi.advanceTimersByTimeAsync(5000);
