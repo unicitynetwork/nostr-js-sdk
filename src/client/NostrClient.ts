@@ -641,10 +641,14 @@ export class NostrClient {
    * across all relays.
    */
   private handleClosedMessage(relayUrl: string, json: unknown[]): void {
-    if (json.length < 3) return;
+    // NIP-01 makes the message field optional: `["CLOSED", <sub>]` is
+    // valid. Dropping such frames was exactly the leak this PR sets out
+    // to fix — no closedSubIds marker and no onError notification means
+    // queries hang until timeout and resubscribe loops persist.
+    if (json.length < 2) return;
 
     const subscriptionId = json[1] as string;
-    const message = json[2] as string;
+    const message = typeof json[2] === 'string' ? json[2] : 'no reason provided';
 
     const relay = this.relays.get(relayUrl);
     if (relay) {
