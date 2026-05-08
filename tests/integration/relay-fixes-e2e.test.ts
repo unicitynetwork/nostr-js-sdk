@@ -3,8 +3,8 @@
  * live testnet relay at wss://nostr-relay.testnet.unicity.network.
  *
  * Each test connects with a fresh keypair so it cannot collide with other
- * sessions and so the keepalive sub_id "__nostr-sdk-keepalive__" gets a
- * deterministic authors:[selfPubkey] filter.
+ * sessions and so the keepalive sub gets a deterministic, unreachable
+ * filter.
  *
  * The default vitest config excludes tests/integration/**, so these
  * tests do NOT run via `npm test` / `npm run test:unit`. Run them with
@@ -27,9 +27,11 @@ const UNREGISTERED_NAMETAG = `e2e-test-${Date.now().toString(36)}-${Math.random(
 
 describe('E2E: relay resilience fixes (issue #7)', () => {
   let client: NostrClient;
+  let clientKeys: NostrKeyManager;
 
   beforeEach(() => {
-    client = new NostrClient(NostrKeyManager.generate(), {
+    clientKeys = NostrKeyManager.generate();
+    client = new NostrClient(clientKeys, {
       // Short ping interval so we can exercise the keepalive REQ shape
       // without hanging the test runner.
       pingIntervalMs: 2000,
@@ -113,10 +115,24 @@ describe('E2E: relay resilience fixes (issue #7)', () => {
       if (origOnMessage) origOnMessage(e);
     };
 
-    // Now wait long enough for at least two ping cycles (pingIntervalMs
-    // = 2000) to see both the send-side REQ shape AND any incoming
-    // live-tail traffic on the "ping" sub.
-    await new Promise((r) => setTimeout(r, 5000));
+    // Wait one ping cycle so the REQ goes out, then publish a real
+    // event from this same key. The previous version of this test
+    // relied on "fresh keypair publishes nothing, so live tail sees
+    // nothing" — that hid the bug where `authors:[self]` matched
+    // every event the wallet itself publishes. Now we publish a real
+    // kind-31113 event during the second cycle and assert it does NOT
+    // come back on the keepalive sub.
+    await new Promise((r) => setTimeout(r, 2500));
+
+    // Publish a kind-31113 token-transfer-shaped event from the SAME
+    // pubkey driving the keepalive. With the broken filter the relay
+    // echoes this back on `__nostr-sdk-keepalive__` within ms.
+    const recipientPubkey = NostrKeyManager.generate().getPublicKeyHex();
+    await client.sendTokenTransfer(recipientPubkey, JSON.stringify({ probe: 'keepalive-leak-check' }));
+
+    // Wait long enough for at least one more ping cycle and for the
+    // relay's live-tail forwarding to fire if the filter were broken.
+    await new Promise((r) => setTimeout(r, 3000));
 
     const pingReqFrame = sentFrames
       .map((m) => { try { return JSON.parse(m); } catch { return undefined; } })
@@ -126,20 +142,23 @@ describe('E2E: relay resilience fixes (issue #7)', () => {
     expect(pingReqFrame![0]).toBe('REQ');
     expect(pingReqFrame![1]).toBe('__nostr-sdk-keepalive__');
 
-    const filter = pingReqFrame![2] as { authors?: string[]; limit?: number };
-    expect(filter.authors).toBeDefined();
-    expect(Array.isArray(filter.authors)).toBe(true);
-    expect(filter.authors!.length).toBe(1);
-    expect(filter.authors![0]).toMatch(/^[0-9a-f]{64}$/);
+    // Filter must use the unreachable id pattern — NOT authors:[self],
+    // which would match every event the wallet itself publishes.
+    const filter = pingReqFrame![2] as Record<string, unknown>;
+    expect(filter.ids).toEqual(['0'.repeat(64)]);
     expect(filter.limit).toBe(1);
-    expect((filter as Record<string, unknown>).kinds).toBeUndefined();
-    expect((filter as Record<string, unknown>)['#p']).toBeUndefined();
+    expect(filter.authors).toBeUndefined();
+    expect(filter.kinds).toBeUndefined();
+    expect(filter['#p']).toBeUndefined();
+    // Defense-in-depth: the wallet pubkey must not appear anywhere in
+    // the filter, no matter the encoding.
+    expect(JSON.stringify(filter)).not.toContain(clientKeys.getPublicKeyHex());
 
-    // Critical regression check: with the broken `{limit:1}` filter,
-    // the relay would be streaming kind-1059 / 31113 events through
-    // sub_id "ping" continuously (≈10/s). With the scoped filter,
-    // there should be 0 (or at most a single own-publish on first
-    // cycle; we use a fresh keypair so that case is excluded).
+    // The actual regression check: with the broken `authors:[self]`
+    // filter, the kind-31113 publish above would be echoed back on
+    // sub_id `__nostr-sdk-keepalive__` (since the wallet is the
+    // author). With the unreachable-id filter, the live tail never
+    // matches and pingEventCount stays 0.
     expect(pingEventCount).toBe(0);
   }, 30_000);
 

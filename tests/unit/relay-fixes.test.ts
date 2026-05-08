@@ -1,7 +1,9 @@
 /**
  * Unit tests for the relay-resilience fixes covered by issue #7:
- *   1. The keepalive "ping" REQ filter must be scoped to authors:[self] so
- *      the relay does not stream a global live-tail through it after EOSE.
+ *   1. The keepalive "ping" REQ filter must use a constraint no real
+ *      event can match, so neither the initial query nor the post-EOSE
+ *      live tail returns wallet events. (Earlier `authors:[self]`
+ *      scoping echoed every event the wallet itself published.)
  *   2. A CLOSED frame from the relay must surface to the listener via
  *      onError and be recorded on the *sending* relay's closedSubIds, so
  *      resubscribeAll / post-AUTH resubscribe skip it on that relay only.
@@ -190,7 +192,7 @@ describe('Relay resilience fixes (issue #7)', () => {
   });
 
   describe('ping filter scoping', () => {
-    it('scopes the keepalive REQ to authors:[selfPubkey]', async () => {
+    it('keepalive REQ filter cannot match any real event (no live-tail leak)', async () => {
       await connect({ pingIntervalMs: 15000 });
 
       await vi.advanceTimersByTimeAsync(15000);
@@ -199,10 +201,36 @@ describe('Relay resilience fixes (issue #7)', () => {
         .find((m) => m[0] === 'REQ' && m[1] === '__nostr-sdk-keepalive__');
 
       expect(reqFrame).toBeDefined();
-      expect(reqFrame[2]).toEqual({
-        authors: [keyManager.getPublicKeyHex()],
-        limit: 1,
-      });
+      const filter = reqFrame[2];
+
+      // The filter must NOT include `authors:[self]` (or any other
+      // open-ended constraint) — that's exactly the live-tail leak that
+      // echoed the wallet's own kind-31113 events back on the keepalive
+      // sub. The fix scopes by an unreachable event id.
+      expect(filter.authors).toBeUndefined();
+
+      // Required: the filter constrains by `ids:[<all-zero hash>]`.
+      // Real Nostr ids are SHA-256 hashes; the all-zero hash is
+      // unreachable, so EOSE comes back immediately and the live tail
+      // never matches a future event.
+      expect(filter.ids).toEqual(['0'.repeat(64)]);
+      expect(filter.limit).toBe(1);
+    });
+
+    it('keepalive filter does not match the wallet\'s own pubkey', async () => {
+      await connect({ pingIntervalMs: 15000 });
+
+      await vi.advanceTimersByTimeAsync(15000);
+      const reqFrame = socket.sentMessages
+        .map((m) => JSON.parse(m))
+        .find((m) => m[0] === 'REQ' && m[1] === '__nostr-sdk-keepalive__');
+
+      // Behavioral assertion: nothing in the filter references the
+      // wallet's own pubkey. If a real event from this pubkey arrived
+      // on the WS, the relay's filter logic would not match this sub.
+      const selfPk = keyManager.getPublicKeyHex();
+      const serialised = JSON.stringify(reqFrame);
+      expect(serialised).not.toContain(selfPk);
     });
 
     it('precedes the REQ with a CLOSE for the same sub_id (no slot accumulation)', async () => {
