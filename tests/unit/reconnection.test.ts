@@ -211,7 +211,7 @@ describe('NostrClient Reconnection', () => {
       fakeSocket.sentMessages.length = 0;
     }
 
-    it('should send ping REQ at each interval, scoped to self to avoid live-tail firehose', async () => {
+    it('should send ping REQ at each interval, scoped to an unreachable id (no live-tail firehose, no self-echo)', async () => {
       await connectClient();
 
       await vi.advanceTimersByTimeAsync(PING_INTERVAL);
@@ -221,15 +221,22 @@ describe('NostrClient Reconnection', () => {
       const pings = fakeSocket.sentMessages.filter(m => m.includes(JSON.stringify(pingSubId)));
       expect(pings.length).toBe(2); // CLOSE + REQ
       expect(pings[0]).toBe(JSON.stringify(['CLOSE', pingSubId]));
-      // The REQ filter MUST include `authors:[selfPubkey]` — otherwise after
-      // EOSE the relay streams every event it receives back through this sub
-      // (NIP-01 live tail), exhausting per-connection subscription slots and
-      // wasting bandwidth.
+
+      // The REQ filter MUST be unreachable. Earlier `authors:[self]`
+      // scoping was wrong — it matched every event the wallet itself
+      // published (kind-31113 token transfers, DMs, etc.) and the
+      // relay echoed them back on the keepalive sub. Filtering by a
+      // single all-zero event id is unreachable in real id space (real
+      // ids are SHA-256 hashes), so EOSE comes back immediately and
+      // the live tail never matches.
       const reqFrame = JSON.parse(pings[1]);
       expect(reqFrame[0]).toBe('REQ');
       expect(reqFrame[1]).toBe(pingSubId);
-      expect(reqFrame[2].authors).toEqual([keyManager.getPublicKeyHex()]);
+      expect(reqFrame[2].ids).toEqual(['0'.repeat(64)]);
       expect(reqFrame[2].limit).toBe(1);
+      // Regression guard: filter must NOT reference the wallet pubkey.
+      expect(reqFrame[2].authors).toBeUndefined();
+      expect(JSON.stringify(reqFrame)).not.toContain(keyManager.getPublicKeyHex());
     });
 
     it('should close socket after 2 unanswered pings when relay is dead', async () => {

@@ -47,6 +47,26 @@ const DEFAULT_PING_INTERVAL_MS = 30000;
 const PING_SUB_ID = '__nostr-sdk-keepalive__';
 
 /**
+ * Filter id used by the keepalive REQ. We need a filter the relay can
+ * resolve immediately (so EOSE comes back fast = relay is alive), but
+ * which can NOT match any real event past EOSE (so the live tail stays
+ * empty).
+ *
+ * Scoping by `authors:[selfPubkey]` was the original approach but it
+ * matched every event the wallet itself published — including kind-31113
+ * token transfers — which the relay then echoed back on the keepalive
+ * sub. Some relays dedupe events across overlapping subs, so the
+ * wallet's own consumer subscription would not receive its own echo and
+ * any flow waiting on that echo would time out.
+ *
+ * The filter `{ ids: ['00...00'] }` asks the relay for a single event
+ * whose id is exactly the all-zero hash. Real Nostr event ids are
+ * SHA-256 over a canonical JSON serialization, so the all-zero hash is
+ * unreachable in practice. Result: instant EOSE, empty live tail.
+ */
+const KEEPALIVE_NEVER_MATCH_ID = '0'.repeat(64);
+
+/**
  * Delay before resubscribing after NIP-42 authentication.
  * This gives the relay time to process the AUTH response before we send
  * subscription requests. Without this delay, some relays may still reject
@@ -539,14 +559,21 @@ export class NostrClient {
       }
 
       // Send a subscription request as a ping (relays respond with EOSE).
-      // The filter MUST be tightly scoped — an open `{ limit: 1 }` filter
-      // with no kinds/authors/#p will, after EOSE, stream every event the
-      // relay receives (NIP-01 live tail), saturating the connection and
-      // exhausting per-connection subscription slots on busy relays.
-      // Scoping by `authors:[self]` keeps the live tail empty in practice
-      // (the relay would only forward our own future events).
+      // The filter MUST be tightly scoped to something no real event can
+      // match — both for the initial query AND the post-EOSE live tail.
+      //
+      // Earlier iterations used `authors:[self]` reasoning that "the
+      // relay would only forward our own future events". That reasoning
+      // was wrong: it precisely DOES forward every event the wallet
+      // publishes, including kind-31113 token transfers. Some relays
+      // dedupe events across overlapping subs, so the wallet's own
+      // consumer subscription would miss its echo and any flow waiting
+      // on it would time out.
+      //
+      // {@link KEEPALIVE_NEVER_MATCH_ID} (the all-zero SHA-256 hash) is
+      // unreachable in real event-id space, so the relay returns EOSE
+      // immediately and the live tail never matches.
       try {
-        const selfPubkey = this.keyManager.getPublicKeyHex();
         // First close any existing ping subscription to ensure we don't accumulate
         const closeMessage = JSON.stringify(['CLOSE', PING_SUB_ID]);
         relay.socket.send(closeMessage);
@@ -554,7 +581,7 @@ export class NostrClient {
         const pingMessage = JSON.stringify([
           'REQ',
           PING_SUB_ID,
-          { authors: [selfPubkey], limit: 1 },
+          { ids: [KEEPALIVE_NEVER_MATCH_ID], limit: 1 },
         ]);
         relay.socket.send(pingMessage);
         relay.unansweredPings++;
