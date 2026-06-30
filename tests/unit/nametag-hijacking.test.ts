@@ -28,6 +28,11 @@ async function createSignedBinding(
   createdAtOverride?: number,
 ): Promise<Event> {
   const event = await createBindingEvent(km, nametag, km.getPublicKeyHex());
+  // These tests exercise the LEGACY (unmarked) resolution fallback, where
+  // selection is first-seen-wins by created_at. Strip the UNIP-01 marker so the
+  // events take that path; the marked (UNIP-01) resolution is covered in
+  // nametag-binding-resolution-determinism.test.ts.
+  (event as unknown as { tags: string[][] }).tags = event.tags.filter((t) => t[0] !== 'L');
   // Override created_at for testing ordering.
   // This invalidates the Schnorr signature, so we stub verify() to return true.
   // These tests exercise ordering/resolution logic, not signature verification.

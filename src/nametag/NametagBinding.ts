@@ -13,6 +13,17 @@ import * as NametagUtils from './NametagUtils.js';
 const DEFAULT_COUNTRY = 'US';
 
 /**
+ * UNIP-01 namespace label for nametag ownership bindings.
+ *
+ * A binding event carrying a NIP-32 ["L", UNICITY_NAMETAG_NAMESPACE] label opts
+ * into relay-enforced single-owner semantics: the first author a UNIP-01 relay
+ * accepts for a given identifier (d-tag) owns it, by relay receive order. The
+ * marker is what makes ownership independent of the self-asserted `created_at`.
+ * See the UNIP-01 spec (unicity-tokens-relay/docs/UNIP-01.md).
+ */
+export const UNICITY_NAMETAG_NAMESPACE = 'unicity:nametag';
+
+/**
  * Binding event content structure
  */
 interface BindingContent {
@@ -104,6 +115,8 @@ export async function createBindingEvent(
 
   const tags: string[][] = [
     ['d', hashedNametag],
+    // UNIP-01: opt this binding into relay-enforced single-owner semantics.
+    ['L', UNICITY_NAMETAG_NAMESPACE],
     ['nametag', hashedNametag],
     ['t', hashedNametag],
     ['address', unicityAddress],
@@ -331,6 +344,19 @@ export function parseAddressFromEvent(event: Event): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * UNIP-01: true if this binding event carries the single-owner namespace marker
+ * (a NIP-32 ["L", UNICITY_NAMETAG_NAMESPACE] label). Such bindings are vetted by
+ * UNIP-01 relays for single ownership and are preferred at resolution over
+ * unmarked (legacy) bindings, independent of the self-asserted `created_at`.
+ *
+ * @param event Binding event
+ * @returns true if the UNIP-01 nametag marker is present
+ */
+export function hasNametagOwnershipMarker(event: Event): boolean {
+  return event.getTagValues('L').includes(UNICITY_NAMETAG_NAMESPACE);
 }
 
 /**

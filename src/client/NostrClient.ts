@@ -23,6 +23,7 @@ import {
   createAddressToBindingFilter,
   createIdentityBindingEvent,
   parseBindingInfo,
+  hasNametagOwnershipMarker,
 } from '../nametag/NametagBinding.js';
 import type { IdentityBindingParams, BindingInfo } from '../nametag/NametagBinding.js';
 
@@ -1167,7 +1168,18 @@ export class NostrClient {
     try {
       await this.publishEvent(event);
       return true;
-    } catch {
+    } catch (err) {
+      // UNIP-01: a relay-enforced single-owner rejection (NIP-20 `blocked:`)
+      // means the nametag is owned by another key — surface it as a hard
+      // failure rather than a silent `false`, which a caller could mistake for
+      // a transient publish error. Other (transient) errors keep returning
+      // false, preserving the prior best-effort behavior.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/blocked:|owned by another key|already claimed/i.test(msg)) {
+        throw new Error(
+          `Nametag "${nametagId}" is already claimed by another key`,
+        );
+      }
       return false;
     }
   }
@@ -1286,20 +1298,26 @@ export class NostrClient {
   }
 
   /**
-   * Query binding events with first-seen-wins anti-hijacking resolution.
+   * Query binding events and select the owner.
    *
-   * Strategy: first-seen-wins across authors, latest-wins for same author.
-   * - Across authors: the pubkey that first published wins (earliest created_at)
-   * - Same author: the most recent event is used (latest created_at = most complete data)
-   * - Tie-breaking: deterministic by lexicographic pubkey comparison (lowest wins)
+   * UNIP-01 (preferred): if any returned binding carries the single-owner
+   * namespace marker (NIP-32 ["L", "unicity:nametag"]), ownership is taken from
+   * the marked binding. These are vetted by UNIP-01 relays for single ownership
+   * (first author by relay receive order owns the identifier), so the
+   * self-asserted `created_at` is ignored entirely. With a UNIP-01 relay set
+   * there is exactly one marked owner; observing more than one distinct marked
+   * author (e.g. across relays in differing states) is treated as ambiguous and
+   * resolves to null rather than guessing.
    *
-   * Events with invalid signatures are silently skipped to prevent relay injection attacks.
+   * Legacy fallback (no marked binding present — e.g. an identifier not yet
+   * migrated): first-seen-wins across authors by `created_at`, latest-wins for
+   * the same author, lexicographic pubkey tie-break. Retained for backward
+   * compatibility during migration; superseded as soon as the owner republishes
+   * a marked binding. (Self-asserted timestamps are not authoritative — this
+   * path exists only so un-migrated identifiers keep resolving.)
    *
-   * Known limitations:
-   * - Timestamps are self-reported (NIP-01). An attacker can set created_at to 0.
-   *   Chain-anchored proof of registration time is the only reliable defense.
-   * - TOCTOU: between conflict check and publish, another user can claim the same nametag.
-   *   This is inherent to Nostr's eventually-consistent relay model.
+   * Events with invalid signatures are silently skipped to prevent relay
+   * injection of forged events.
    *
    * @param filter Subscription filter
    * @param extractResult Callback to extract the desired result from the winning event
@@ -1335,11 +1353,26 @@ export class NostrClient {
 
       timeoutId = setTimeout(() => finishWith(null), this.queryTimeoutMs);
 
-      const authors = new Map<string, { firstSeen: number; latestEvent: Event }>();
+      const authors = new Map<
+        string,
+        { firstSeen: number; latestEvent: Event; latestMarked: Event | null }
+      >();
 
       const allRelaysDone = (id: string): boolean => this.allRelaysDoneFor(id);
 
       const pickWinner = (): T | null => {
+        // UNIP-01: prefer marker-carrying (relay-vetted single-owner) bindings,
+        // ignoring the self-asserted created_at.
+        const marked = [...authors.values()]
+          .map((e) => e.latestMarked)
+          .filter((e): e is Event => e !== null);
+        if (marked.length > 0) {
+          // Exactly one marked owner is the relay-enforced norm. More than one
+          // distinct marked author means cross-relay disagreement — do not guess.
+          const owner = marked.length === 1 ? marked[0] : undefined;
+          return owner ? extractResult(owner) : null;
+        }
+        // Legacy fallback: first-seen-wins by self-asserted created_at.
         let winnerEntry: { firstSeen: number; latestEvent: Event } | null = null;
         let winnerPubkey = '';
         for (const [pubkey, entry] of authors) {
@@ -1358,15 +1391,24 @@ export class NostrClient {
           // Verify signature to prevent relay injection of forged events (#4)
           if (!event.verify()) return;
 
+          const marked = hasNametagOwnershipMarker(event);
           const existing = authors.get(event.pubkey);
           if (!existing) {
-            authors.set(event.pubkey, { firstSeen: event.created_at, latestEvent: event });
+            authors.set(event.pubkey, {
+              firstSeen: event.created_at,
+              latestEvent: event,
+              latestMarked: marked ? event : null,
+            });
           } else {
             if (event.created_at < existing.firstSeen) {
               existing.firstSeen = event.created_at;
             }
             if (event.created_at > existing.latestEvent.created_at) {
               existing.latestEvent = event;
+            }
+            if (marked && (!existing.latestMarked
+                || event.created_at > existing.latestMarked.created_at)) {
+              existing.latestMarked = event;
             }
           }
         },
