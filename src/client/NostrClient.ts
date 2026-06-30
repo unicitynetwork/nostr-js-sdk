@@ -1175,7 +1175,9 @@ export class NostrClient {
       // a transient publish error. Other (transient) errors keep returning
       // false, preserving the prior best-effort behavior.
       const msg = err instanceof Error ? err.message : String(err);
-      if (/blocked:|owned by another key|already claimed/i.test(msg)) {
+      // Match only the ownership-conflict message, not the generic NIP-20
+      // `blocked:` prefix (which also covers spam/rate-limit/policy rejections).
+      if (/owned by another key|already claimed/i.test(msg)) {
         throw new Error(
           `Nametag "${nametagId}" is already claimed by another key`,
         );
@@ -1353,24 +1355,24 @@ export class NostrClient {
 
       timeoutId = setTimeout(() => finishWith(null), this.queryTimeoutMs);
 
-      const authors = new Map<
-        string,
-        { firstSeen: number; latestEvent: Event; latestMarked: Event | null }
-      >();
+      const authors = new Map<string, { firstSeen: number; latestEvent: Event }>();
 
       const allRelaysDone = (id: string): boolean => this.allRelaysDoneFor(id);
 
       const pickWinner = (): T | null => {
         // UNIP-01: prefer marker-carrying (relay-vetted single-owner) bindings,
-        // ignoring the self-asserted created_at.
-        const marked = [...authors.values()]
-          .map((e) => e.latestMarked)
-          .filter((e): e is Event => e !== null);
+        // ignoring the self-asserted created_at. The marker is read from each
+        // author's CURRENT (latest, per NIP-33 replaceable) event, so a newer
+        // unmarked update correctly drops the author from the marked set, and a
+        // marked owner resolves to their freshest binding.
+        const marked = [...authors.values()].filter((e) =>
+          hasNametagOwnershipMarker(e.latestEvent),
+        );
         if (marked.length > 0) {
           // Exactly one marked owner is the relay-enforced norm. More than one
           // distinct marked author means cross-relay disagreement — do not guess.
           const owner = marked.length === 1 ? marked[0] : undefined;
-          return owner ? extractResult(owner) : null;
+          return owner ? extractResult(owner.latestEvent) : null;
         }
         // Legacy fallback: first-seen-wins by self-asserted created_at.
         let winnerEntry: { firstSeen: number; latestEvent: Event } | null = null;
@@ -1391,24 +1393,15 @@ export class NostrClient {
           // Verify signature to prevent relay injection of forged events (#4)
           if (!event.verify()) return;
 
-          const marked = hasNametagOwnershipMarker(event);
           const existing = authors.get(event.pubkey);
           if (!existing) {
-            authors.set(event.pubkey, {
-              firstSeen: event.created_at,
-              latestEvent: event,
-              latestMarked: marked ? event : null,
-            });
+            authors.set(event.pubkey, { firstSeen: event.created_at, latestEvent: event });
           } else {
             if (event.created_at < existing.firstSeen) {
               existing.firstSeen = event.created_at;
             }
             if (event.created_at > existing.latestEvent.created_at) {
               existing.latestEvent = event;
-            }
-            if (marked && (!existing.latestMarked
-                || event.created_at > existing.latestMarked.created_at)) {
-              existing.latestMarked = event;
             }
           }
         },
