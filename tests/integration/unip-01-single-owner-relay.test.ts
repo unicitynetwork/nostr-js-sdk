@@ -21,9 +21,11 @@ import { Event } from '../../src/protocol/Event.js';
 const RELAY_URL = process.env.RELAY_URL?.trim() || 'wss://nostr-relay.testnet.unicity.network';
 
 // A fresh nametag per run — UNIP-01 ownership is permanent on the relay, so we
-// must not collide with a previous run's owner. [a-z0-9], 3-20 chars.
+// must not collide with a previous run's owner. A fixed-length slice of a fresh
+// (cryptographically random) pubkey gives a stable [a-z0-9] length and a
+// negligible collision chance. Result: "e2e" + 12 hex chars = 15 chars (≤ 20).
 function uniqueNametag(): string {
-  return `e2e${Math.random().toString(36).slice(2, 9)}`;
+  return `e2e${NostrKeyManager.generate().getPublicKeyHex().slice(0, 12)}`;
 }
 
 const chainKey = (m: string): string => '02' + m.repeat(64);
@@ -64,8 +66,9 @@ describe('UNIP-01 live e2e: single-owner nametag ownership', () => {
       directAddress: `DIRECT://${ownerChain}`,
     });
     expect(ownerBinding.getTagValues('L')).toContain(UNICITY_NAMETAG_NAMESPACE);
+    // publishEvent resolves on the relay's OK:true, which is sent only after the
+    // event (and its namespace_owner record) is committed — no settle needed.
     await owner.publishEvent(ownerBinding);
-    await new Promise((r) => setTimeout(r, 1000)); // settle
 
     // 2. A second key tries to overwrite the binding with its own marked binding
     //    (current timestamp). The relay must reject it (NIP-20 `blocked:` —
@@ -88,7 +91,8 @@ describe('UNIP-01 live e2e: single-owner nametag ownership', () => {
     await expect(other.publishEvent(backdated)).rejects.toThrow();
 
     // 4. A third party resolving the nametag gets the OWNER, not the second key.
-    await new Promise((r) => setTimeout(r, 750));
+    //    The owner's binding is already committed (step 1) and the rejected
+    //    publishes changed no state, so no settle is needed here either.
     const resolved = await resolver.queryPubkeyByNametag(nametag);
     expect(resolved).toBe(ownerKeys.getPublicKeyHex());
     expect(resolved).not.toBe(otherKeys.getPublicKeyHex());
