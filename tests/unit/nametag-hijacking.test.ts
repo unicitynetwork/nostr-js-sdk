@@ -2,7 +2,9 @@
  * Tests for nametag hijacking prevention.
  *
  * Verifies the two core anti-hijacking mechanisms:
- * 1. First-seen-wins: queryPubkeyByNametag returns the earliest binding author
+ * 1. No guessing between authors: when more than one author publishes a legacy
+ *    (unmarked) binding for a nametag, resolution returns null — `created_at` is
+ *    self-asserted, so it never picks a winner
  * 2. Conflict detection: publishNametagBinding rejects if nametag is claimed by another pubkey
  *
  * These are the critical paths that prevent a malicious actor from overwriting
@@ -28,9 +30,9 @@ async function createSignedBinding(
   createdAtOverride?: number,
 ): Promise<Event> {
   const event = await createBindingEvent(km, nametag, km.getPublicKeyHex());
-  // These tests exercise the LEGACY (unmarked) resolution fallback, where
-  // selection is first-seen-wins by created_at. Strip the UNIP-01 marker so the
-  // events take that path; the marked (UNIP-01) resolution is covered in
+  // These tests exercise the LEGACY (unmarked) resolution path, where a single
+  // author resolves and several authors are ambiguous. Strip the UNIP-01 marker
+  // so the events take that path; the marked (UNIP-01) resolution is covered in
   // nametag-binding-resolution-determinism.test.ts.
   (event as unknown as { tags: string[][] }).tags = event.tags.filter((t) => t[0] !== 'L');
   // Override created_at for testing ordering.
@@ -87,34 +89,30 @@ describe('Nametag hijacking prevention', () => {
   });
 
   // ===========================================================================
-  // First-seen-wins: queryPubkeyByNametag
+  // Ambiguity: queryPubkeyByNametag
   // ===========================================================================
 
-  describe('queryPubkeyByNametag (first-seen-wins)', () => {
-    it('should return the pubkey of the earliest binding event', async () => {
-      // Alice registered first (timestamp 1000), Bob tried later (timestamp 2000)
+  describe('queryPubkeyByNametag (several legacy authors are ambiguous)', () => {
+    it('should return null when two authors publish legacy bindings for the same nametag', async () => {
+      // Alice's binding says 1000, Bob's says 2000 — but both are self-asserted,
+      // and Bob could just as well have claimed 1.
       const aliceEvent = await createSignedBinding(alice, 'coolname', 1000);
       const bobEvent = await createSignedBinding(bob, 'coolname', 2000);
 
-      // Relay returns both events (order doesn't matter — code picks earliest)
       stubSubscribe(client, [bobEvent, aliceEvent]);
 
       const owner = await client.queryPubkeyByNametag('coolname');
-      expect(owner).toBe(alice.getPublicKeyHex());
+      expect(owner).toBeNull();
     });
 
-    it('should still pick earliest even when attacker event arrives first', async () => {
-      // Attacker (Bob) published later but relay delivers his event first
+    it('should return null whatever the delivery order', async () => {
       const aliceEvent = await createSignedBinding(alice, 'target', 1000);
       const bobEvent = await createSignedBinding(bob, 'target', 2000);
 
-      // Bob's event arrives first in the subscription stream
-      stubSubscribe(client, [bobEvent, aliceEvent]);
+      stubSubscribe(client, [aliceEvent, bobEvent]);
 
       const owner = await client.queryPubkeyByNametag('target');
-      // Alice's event has earlier timestamp → she wins
-      expect(owner).toBe(alice.getPublicKeyHex());
-      expect(owner).not.toBe(bob.getPublicKeyHex());
+      expect(owner).toBeNull();
     });
 
     it('should return null when no binding exists', async () => {
@@ -132,8 +130,7 @@ describe('Nametag hijacking prevention', () => {
       expect(owner).toBe(alice.getPublicKeyHex());
     });
 
-    it('should handle multiple hijack attempts and still return original owner', async () => {
-      // Alice is the original owner (earliest)
+    it('should return null under multiple competing legacy bindings', async () => {
       const aliceEvent = await createSignedBinding(alice, 'popular', 1000);
 
       // Multiple attackers try to claim the same nametag
@@ -146,25 +143,33 @@ describe('Nametag hijacking prevention', () => {
       stubSubscribe(client, [attack2Event, attack1Event, aliceEvent]);
 
       const owner = await client.queryPubkeyByNametag('popular');
-      expect(owner).toBe(alice.getPublicKeyHex());
+      expect(owner).toBeNull();
     });
   });
 
   // ===========================================================================
-  // First-seen-wins: queryBindingByNametag
+  // Ambiguity: queryBindingByNametag
   // ===========================================================================
 
-  describe('queryBindingByNametag (first-seen-wins with extended info)', () => {
-    it('should return BindingInfo from the earliest event', async () => {
+  describe('queryBindingByNametag (extended info)', () => {
+    it('should return BindingInfo from the only author', async () => {
       const aliceEvent = await createSignedBinding(alice, 'richinfo', 1000);
-      const bobEvent = await createSignedBinding(bob, 'richinfo', 2000);
 
-      stubSubscribe(client, [bobEvent, aliceEvent]);
+      stubSubscribe(client, [aliceEvent]);
 
       const info = await client.queryBindingByNametag('richinfo');
       expect(info).not.toBeNull();
       expect(info!.transportPubkey).toBe(alice.getPublicKeyHex());
       expect(info!.timestamp).toBe(1000 * 1000); // converted to ms
+    });
+
+    it('should return null when two authors publish legacy bindings', async () => {
+      const aliceEvent = await createSignedBinding(alice, 'richinfo', 1000);
+      const bobEvent = await createSignedBinding(bob, 'richinfo', 2000);
+
+      stubSubscribe(client, [bobEvent, aliceEvent]);
+
+      expect(await client.queryBindingByNametag('richinfo')).toBeNull();
     });
 
     it('should return null when no binding exists', async () => {
@@ -205,21 +210,16 @@ describe('Nametag hijacking prevention', () => {
       expect(info!.l1Address).toBe('alpha1updated');
     });
 
-    it('queryBindingByNametag should return latest same-author even when attacker also present', async () => {
-      // Alice: old binding at 1000, updated at 3000
+    it('queryBindingByNametag should return null when another author is also present', async () => {
+      // Alice: old binding at 1000, updated at 3000; Bob's binding says 2000.
       const aliceOld = await createSignedBinding(alice, 'contested', 1000);
       const aliceNew = await createSignedBinding(alice, 'contested', 3000);
-      // Bob tries to hijack at 2000 (between Alice's two events)
       const bobEvent = await createSignedBinding(bob, 'contested', 2000);
 
       stubSubscribe(client, [bobEvent, aliceNew, aliceOld]);
 
-      const info = await client.queryBindingByNametag('contested');
-      expect(info).not.toBeNull();
-      // Alice wins (earliest first-seen = 1000)
-      expect(info!.transportPubkey).toBe(alice.getPublicKeyHex());
-      // But we get Alice's LATEST event (timestamp 3000)
-      expect(info!.timestamp).toBe(3000 * 1000);
+      // Alice's extra event does not make her more of an owner: two authors.
+      expect(await client.queryBindingByNametag('contested')).toBeNull();
     });
 
     it('queryBindingByAddress should return latest event from same author', async () => {
@@ -247,16 +247,13 @@ describe('Nametag hijacking prevention', () => {
       expect(info!.l1Address).toBe('alpha1full');
     });
 
-    it('queryPubkeyByNametag should still pick earliest author even with multiple same-author events', async () => {
-      // Alice has two events (1000, 3000), Bob has one (2000)
+    it('queryPubkeyByNametag should resolve one author with several events', async () => {
       const alice1 = await createSignedBinding(alice, 'multiauth', 1000);
       const alice2 = await createSignedBinding(alice, 'multiauth', 3000);
-      const bobEvent = await createSignedBinding(bob, 'multiauth', 2000);
 
-      stubSubscribe(client, [alice2, bobEvent, alice1]);
+      stubSubscribe(client, [alice2, alice1]);
 
       const owner = await client.queryPubkeyByNametag('multiauth');
-      // Alice first appeared at 1000, Bob at 2000 → Alice wins
       expect(owner).toBe(alice.getPublicKeyHex());
     });
   });
@@ -280,6 +277,35 @@ describe('Nametag hijacking prevention', () => {
       ).rejects.toThrow('already claimed');
 
       bobClient.disconnect();
+    });
+
+    it('should throw when two other authors contest the nametag', async () => {
+      // Contested resolves to null, but null here does not mean "available".
+      const aliceEvent = await createSignedBinding(alice, 'contested', 1000);
+      const bobEvent = await createSignedBinding(bob, 'contested', 2000);
+
+      const carol = NostrKeyManager.generate();
+      const carolClient = new NostrClient(carol, { queryTimeoutMs: 1000 });
+      stubSubscribe(carolClient, [aliceEvent, bobEvent]);
+      const publishSpy = vi.spyOn(carolClient, 'publishEvent').mockResolvedValue('event-id');
+
+      await expect(
+        carolClient.publishNametagBinding('contested', carol.getPublicKeyHex()),
+      ).rejects.toThrow('already claimed');
+      expect(publishSpy).not.toHaveBeenCalled();
+
+      carolClient.disconnect();
+    });
+
+    it('should succeed when the publisher is one of the contesting authors', async () => {
+      // Lets a legacy owner republish (e.g. migrate to a marked binding) even
+      // when someone else has published a competing legacy binding.
+      const aliceEvent = await createSignedBinding(alice, 'contested', 1000);
+      const bobEvent = await createSignedBinding(bob, 'contested', 2000);
+      stubSubscribe(client, [aliceEvent, bobEvent]);
+      vi.spyOn(client, 'publishEvent').mockResolvedValue('event-id');
+
+      await expect(client.publishNametagBinding('contested', alice.getPublicKeyHex())).resolves.toBe(true);
     });
 
     it('should succeed when nametag is unclaimed', async () => {
@@ -338,21 +364,21 @@ describe('Nametag hijacking prevention', () => {
   // ===========================================================================
 
   describe('end-to-end hijacking scenario', () => {
-    it('Alice registers, Bob tries to hijack, resolution still returns Alice', async () => {
-      // Step 1: Alice publishes her binding (timestamp 1000)
+    it('Alice registers a legacy binding, Bob publishes one too, resolution never returns Bob', async () => {
+      // Step 1: Alice publishes her legacy binding (timestamp 1000)
       const aliceEvent = await createSignedBinding(alice, 'alice', 1000);
 
-      // Step 2: Bob (attacker) publishes a binding for the same nametag (timestamp 2000)
+      // Step 2: Bob (attacker) publishes a legacy binding for the same nametag.
+      // Unmarked bindings are not relay-vetted, so nothing stops him.
       const bobEvent = await createSignedBinding(bob, 'alice', 2000);
 
-      // Step 3: Both events exist on the relay
-      // Any client resolving "alice" should get Alice's pubkey (earliest)
+      // Step 3: Both events exist on the relay. Nothing the client can see tells
+      // the real owner apart, so resolution refuses rather than sending to Bob.
       const resolver = new NostrClient(NostrKeyManager.generate(), { queryTimeoutMs: 1000 });
       stubSubscribe(resolver, [bobEvent, aliceEvent]);
 
       const resolvedPubkey = await resolver.queryPubkeyByNametag('alice');
-      expect(resolvedPubkey).toBe(alice.getPublicKeyHex());
-      expect(resolvedPubkey).not.toBe(bob.getPublicKeyHex());
+      expect(resolvedPubkey).toBeNull();
 
       resolver.disconnect();
     });

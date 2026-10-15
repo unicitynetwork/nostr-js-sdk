@@ -168,7 +168,7 @@ describe('E2E: relay resilience fixes (issue #7)', () => {
     // tightly-scoped query, then injecting a synthetic CLOSED frame at
     // the WebSocketAdapter level by reaching into the SDK's relay map.
     //
-    // This proves the wiring (queryWithFirstSeenWins surfaces CLOSED →
+    // This proves the wiring (queryBindingClaimants surfaces CLOSED →
     // settles) end-to-end against a real connection. The pure filter /
     // protocol behavior is already covered by the unit test.
     await client.connect(RELAY_URL);

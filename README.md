@@ -345,15 +345,19 @@ Tags enable indexed lookups:
 
 #### Anti-Hijacking Resolution Strategy
 
-All query methods use **first-seen-wins across authors, latest-wins for same author**:
+All query methods resolve to **a single owner, or `null`** — never to a guess between competing authors:
 
-1. **First-seen-wins across authors** — if multiple pubkeys claim the same nametag, the author who published the earliest `created_at` event wins. Ties are broken deterministically by lexicographic pubkey comparison. This prevents hijacking.
+1. **Only events that bind the queried identifier count** — a nametag lookup counts only bindings whose `d` tag is the nametag's hash (the tag a UNIP-01 relay vets ownership of); an address lookup counts only events carrying the address's `t` tag. A relay match alone proves nothing: anyone can attach any `t` tag to their own event.
 
-2. **Latest-wins for same author** — if the rightful owner publishes multiple events (e.g., initial binding without nametag, then updated binding with nametag), the most recent event is returned. This ensures queries return the most complete data.
+2. **UNIP-01 marked bindings first (nametags only)** — if any author's current binding carries `["L", "unicity:nametag"]`, only marked authors are considered. Address lookups ignore the marker: it vouches for a binding's nametag, not for the addresses it advertises.
 
-3. **Signature verification** — events with invalid signatures are silently skipped, preventing malicious relays from injecting forged events.
+3. **Exactly one author resolves; more than one is ambiguous (`null`)** — `created_at` is self-asserted, so it never chooses between authors. A single legacy (unmarked) author still resolves.
 
-This two-level strategy is critical for the wallet workflow where a binding may be published first without a nametag, then updated later when the user registers one. Both events share address `#t` tags, so address-based lookups see both — the strategy ensures the latest (most complete) event from the original author is returned.
+4. **Latest-wins for same author** — if the owner publishes multiple events (e.g., initial binding without nametag, then updated binding with nametag), the most recent event is returned. This ensures queries return the most complete data.
+
+5. **Signature verification** — events with invalid signatures are silently skipped, preventing malicious relays from injecting forged events.
+
+Latest-wins matters for the wallet workflow where a binding may be published first without a nametag, then updated later when the user registers one. Both events share address `#t` tags, so address-based lookups see both — both are from the same author, so the latest (most complete) one is returned.
 
 #### Privacy
 
