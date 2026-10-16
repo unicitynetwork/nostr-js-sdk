@@ -26,6 +26,7 @@ import {
   hasNametagOwnershipMarker,
 } from '../nametag/NametagBinding.js';
 import type { IdentityBindingParams, BindingInfo } from '../nametag/NametagBinding.js';
+import * as NametagUtils from '../nametag/NametagUtils.js';
 
 /** Connection timeout in milliseconds */
 const CONNECTION_TIMEOUT_MS = 30000;
@@ -143,7 +144,7 @@ interface RelayConnection {
   // may have the same sub_id alive on a different healthy relay.
   closedSubIds: Set<string>;
   // Sub_ids this specific relay has EOSE'd for us. Combined with
-  // closedSubIds, lets queryWithFirstSeenWins decide when ALL
+  // closedSubIds, lets queryBindingClaimants decide when ALL
   // connected relays have finished (either streamed EOSE or rejected
   // with CLOSED) so it doesn't settle early off a single fast relay
   // while a slower one still has matching events to deliver.
@@ -157,6 +158,16 @@ interface PendingOk {
   resolve: (eventId: string) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+}
+
+/**
+ * The single claimant's result, or null when nobody claims the identifier or
+ * more than one author does: a competing claim (or cross-relay disagreement)
+ * that nothing trustworthy can settle, so resolution does not guess.
+ */
+function singleOwner<T>(claimants: Event[], extractResult: (event: Event) => T): T | null {
+  const [owner, ...others] = claimants;
+  return owner && others.length === 0 ? extractResult(owner) : null;
 }
 
 /**
@@ -436,7 +447,7 @@ export class NostrClient {
               this.emitConnectionEvent('disconnect', url, reason);
 
               // Re-trigger the all-done check on every active sub.
-              // queryWithFirstSeenWins.allRelaysDoneFor only runs
+              // queryBindingClaimants.allRelaysDoneFor only runs
               // from listener callbacks (EOSE / CLOSED via onError);
               // a socket that drops without sending either would
               // otherwise leave the query hanging until
@@ -723,7 +734,7 @@ export class NostrClient {
    * Handle EOSE (End of Stored Events) message from relay.
    *
    * Records the per-relay EOSE marker (mirroring closedSubIds) so
-   * queryWithFirstSeenWins can decide when ALL connected relays have
+   * queryBindingClaimants can decide when ALL connected relays have
    * finished — either streamed EOSE or rejected with CLOSED — instead
    * of settling off the first fast relay's EOSE while a slower relay
    * is still about to deliver matching events.
@@ -767,7 +778,7 @@ export class NostrClient {
    * Instead we record the rejection on the sending relay's
    * `closedSubIds` set so `resubscribeAll` and post-AUTH resubscribe
    * skip it on this relay only. The listener is notified via
-   * `onError` so callers (e.g. queryWithFirstSeenWins) can decide to
+   * `onError` so callers (e.g. queryBindingClaimants) can decide to
    * settle and explicitly `unsubscribe()` if they want to give up
    * across all relays.
    */
@@ -791,7 +802,7 @@ export class NostrClient {
     // pre-auth REQs with `CLOSED("auth-required:...")` and then send
     // an AUTH challenge. resubscribeAfterAuth re-issues the sub, so
     // this rejection is NOT terminal. If we marked closedSubIds here,
-    // queryWithFirstSeenWins.onError would settle the future
+    // queryBindingClaimants.onError would settle the future
     // prematurely (single-relay → allRelaysDoneFor=true), unsubscribe
     // the sub, and the post-AUTH retry would find nothing to retry.
     // Listener still gets onError so callers see the reason; we just
@@ -859,7 +870,7 @@ export class NostrClient {
     //    with zero events (filter unsatisfiable without auth context);
     //    post-auth the same filter might match. We must re-arm the
     //    local "still waiting" state so any in-flight
-    //    queryWithFirstSeenWins doesn't see this relay as already-done
+    //    queryBindingClaimants doesn't see this relay as already-done
     //    from a stale marker.
     setTimeout(() => {
       const r = this.relays.get(relayUrl);
@@ -908,7 +919,7 @@ export class NostrClient {
     }
 
     // Notify in-flight subscriptions that we're shutting down.
-    // queryWithFirstSeenWins.onError re-checks allRelaysDoneFor (now
+    // queryBindingClaimants.onError re-checks allRelaysDoneFor (now
     // 0 connected → trivially true) and settles immediately, sparing
     // callers the full queryTimeoutMs wait. Snapshot keys first
     // because the listener may call unsubscribe(), which mutates
@@ -1149,9 +1160,11 @@ export class NostrClient {
     unicityAddress: string,
     identity?: IdentityBindingParams,
   ): Promise<boolean> {
-    // Check if already claimed by another pubkey
-    const existingOwner = await this.queryPubkeyByNametag(nametagId);
-    if (existingOwner && existingOwner !== this.keyManager.getPublicKeyHex()) {
+    // Check if already claimed by another pubkey. A contested nametag resolves
+    // to null but is not available; a claimant may still republish its own
+    // binding (e.g. to migrate it to a marked one).
+    const claimants = (await this.queryNametagClaimants(nametagId)).map((event) => event.pubkey);
+    if (claimants.length > 0 && !claimants.includes(this.keyManager.getPublicKeyHex())) {
       throw new Error(
         `Nametag "${nametagId}" is already claimed by another pubkey`
       );
@@ -1300,35 +1313,37 @@ export class NostrClient {
   }
 
   /**
-   * Query binding events and select the owner.
+   * Query binding events and collect the authors claiming the queried identifier.
    *
-   * UNIP-01 (preferred): if any returned binding carries the single-owner
-   * namespace marker (NIP-32 ["L", "unicity:nametag"]), ownership is taken from
-   * the marked binding. These are vetted by UNIP-01 relays for single ownership
-   * (first author by relay receive order owns the identifier), so the
-   * self-asserted `created_at` is ignored entirely. With a UNIP-01 relay set
-   * there is exactly one marked owner; observing more than one distinct marked
-   * author (e.g. across relays in differing states) is treated as ambiguous and
-   * resolves to null rather than guessing.
+   * Only events for which `isCandidate` holds are counted: the relay is
+   * untrusted, and a filter match alone proves nothing (anyone can attach any
+   * `t` tag to their own event). Each author's CURRENT binding is its latest
+   * event (NIP-33 replaceable); older events from the same author are ignored.
    *
-   * Legacy fallback (no marked binding present — e.g. an identifier not yet
-   * migrated): first-seen-wins across authors by `created_at`, latest-wins for
-   * the same author, lexicographic pubkey tie-break. Retained for backward
-   * compatibility during migration; superseded as soon as the owner republishes
-   * a marked binding. (Self-asserted timestamps are not authoritative — this
-   * path exists only so un-migrated identifiers keep resolving.)
+   * UNIP-01 (`useOwnershipMarker`): if any author's current binding carries the
+   * single-owner namespace marker (NIP-32 ["L", "unicity:nametag"]), only marked
+   * authors are considered. A UNIP-01 relay vets the marker for the event's own
+   * `d` tag, so this is meaningful only when `isCandidate` requires that `d` tag
+   * to be the queried identifier — never for address lookups.
+   *
+   * Resolves to each remaining claimant's latest event (empty if none, or on
+   * timeout). See `singleOwner`: exactly one claimant is the owner; more than
+   * one is ambiguous. `created_at` is self-asserted, so it never chooses
+   * between authors.
    *
    * Events with invalid signatures are silently skipped to prevent relay
    * injection of forged events.
    *
    * @param filter Subscription filter
-   * @param extractResult Callback to extract the desired result from the winning event
-   * @returns Promise resolving to the extracted result, or null
+   * @param isCandidate Whether an event binds the queried identifier
+   * @param useOwnershipMarker Whether marked bindings take precedence
+   * @returns Promise resolving to the claimants' latest events
    */
-  private queryWithFirstSeenWins<T>(
+  private queryBindingClaimants(
     filter: Filter,
-    extractResult: (event: Event) => T,
-  ): Promise<T | null> {
+    isCandidate: (event: Event) => boolean,
+    useOwnershipMarker: boolean,
+  ): Promise<Event[]> {
     return new Promise((resolve) => {
       let subscriptionId = '';
       let settled = false;
@@ -1344,7 +1359,7 @@ export class NostrClient {
       // callbacks before its return value is bound to `subscriptionId`
       // — the closure-captured value would still be `''` and we'd skip
       // the CLOSE frame, leaking the slot on the relay.
-      const finishWith = (result: T | null, id?: string) => {
+      const finishWith = (result: Event[], id?: string) => {
         if (settled) return;
         settled = true;
         if (timeoutId !== undefined) clearTimeout(timeoutId);
@@ -1353,56 +1368,33 @@ export class NostrClient {
         resolve(result);
       };
 
-      timeoutId = setTimeout(() => finishWith(null), this.queryTimeoutMs);
+      timeoutId = setTimeout(() => finishWith([]), this.queryTimeoutMs);
 
-      const authors = new Map<string, { firstSeen: number; latestEvent: Event }>();
+      // Author pubkey -> that author's latest candidate event.
+      const latestByAuthor = new Map<string, Event>();
 
       const allRelaysDone = (id: string): boolean => this.allRelaysDoneFor(id);
 
-      const pickWinner = (): T | null => {
-        // UNIP-01: prefer marker-carrying (relay-vetted single-owner) bindings,
-        // ignoring the self-asserted created_at. The marker is read from each
-        // author's CURRENT (latest, per NIP-33 replaceable) event, so a newer
-        // unmarked update correctly drops the author from the marked set, and a
-        // marked owner resolves to their freshest binding.
-        const marked = [...authors.values()].filter((e) =>
-          hasNametagOwnershipMarker(e.latestEvent),
-        );
-        if (marked.length > 0) {
-          // Exactly one marked owner is the relay-enforced norm. More than one
-          // distinct marked author means cross-relay disagreement — do not guess.
-          const owner = marked.length === 1 ? marked[0] : undefined;
-          return owner ? extractResult(owner.latestEvent) : null;
+      const pickClaimants = (): Event[] => {
+        const claimants = [...latestByAuthor.values()];
+        if (useOwnershipMarker) {
+          // The marker is read from each author's CURRENT event, so a newer
+          // unmarked update correctly drops the author from the marked set.
+          const marked = claimants.filter(hasNametagOwnershipMarker);
+          if (marked.length > 0) return marked;
         }
-        // Legacy fallback: first-seen-wins by self-asserted created_at.
-        let winnerEntry: { firstSeen: number; latestEvent: Event } | null = null;
-        let winnerPubkey = '';
-        for (const [pubkey, entry] of authors) {
-          if (!winnerEntry
-              || entry.firstSeen < winnerEntry.firstSeen
-              || (entry.firstSeen === winnerEntry.firstSeen && pubkey < winnerPubkey)) {
-            winnerEntry = entry;
-            winnerPubkey = pubkey;
-          }
-        }
-        return winnerEntry ? extractResult(winnerEntry.latestEvent) : null;
+        return claimants;
       };
 
       subscriptionId = this.subscribe(filter, {
         onEvent: (event) => {
+          if (!isCandidate(event)) return;
           // Verify signature to prevent relay injection of forged events (#4)
           if (!event.verify()) return;
 
-          const existing = authors.get(event.pubkey);
-          if (!existing) {
-            authors.set(event.pubkey, { firstSeen: event.created_at, latestEvent: event });
-          } else {
-            if (event.created_at < existing.firstSeen) {
-              existing.firstSeen = event.created_at;
-            }
-            if (event.created_at > existing.latestEvent.created_at) {
-              existing.latestEvent = event;
-            }
+          const existing = latestByAuthor.get(event.pubkey);
+          if (!existing || event.created_at > existing.created_at) {
+            latestByAuthor.set(event.pubkey, event);
           }
         },
         // EOSE means *this relay* has finished delivering stored
@@ -1413,7 +1405,7 @@ export class NostrClient {
         // allDone is trivially true with one relay.)
         onEndOfStoredEvents: (id) => {
           if (allRelaysDone(id)) {
-            finishWith(pickWinner(), id);
+            finishWith(pickClaimants(), id);
           }
         },
         // Subscription error from the SDK — fires from three paths
@@ -1434,7 +1426,7 @@ export class NostrClient {
         onError: (id, message) => {
           console.warn(`Subscription error on ${id}: ${message}`);
           if (allRelaysDone(id)) {
-            finishWith(pickWinner(), id);
+            finishWith(pickClaimants(), id);
           }
           // else: keep waiting for EOSE / CLOSED from remaining
           // relays or the overall query timeout.
@@ -1446,7 +1438,7 @@ export class NostrClient {
   /**
    * True if every currently-connected relay has finished delivering
    * for the given sub_id (either EOSE'd or CLOSED'd it). Used by
-   * queryWithFirstSeenWins to coordinate multi-relay settlement.
+   * queryBindingClaimants to coordinate multi-relay settlement.
    */
   private allRelaysDoneFor(subscriptionId: string): boolean {
     const connected = Array.from(this.relays.values()).filter((r) => r.connected);
@@ -1459,43 +1451,58 @@ export class NostrClient {
 
   /**
    * Query for a public key by nametag.
-   * Uses first-seen-wins anti-hijacking resolution.
+   * Resolves the nametag's single owner (UNIP-01 marked binding preferred);
+   * null if no binding exists or several authors claim it.
    * @param nametagId Nametag identifier
-   * @returns Promise that resolves with the public key hex, or null if not found
+   * @returns Promise that resolves with the public key hex, or null if not found or ambiguous
    */
   async queryPubkeyByNametag(nametagId: string): Promise<string | null> {
-    return this.queryWithFirstSeenWins(
-      createNametagToPubkeyFilter(nametagId),
-      (event) => event.pubkey,
-    );
+    return singleOwner(await this.queryNametagClaimants(nametagId), (event) => event.pubkey);
   }
 
   /**
    * Query for full binding info by nametag.
-   * Returns extended identity fields (chain pubkey, addresses, etc.) when available.
-   * Uses first-seen-wins across authors, latest-wins for same author.
+   * Returns extended identity fields (chain pubkey, addresses, etc.) when available,
+   * from the owner's latest binding. Same owner selection as queryPubkeyByNametag.
    * @param nametagId Nametag identifier
-   * @returns Promise that resolves with BindingInfo, or null if not found
+   * @returns Promise that resolves with BindingInfo, or null if not found or ambiguous
    */
   async queryBindingByNametag(nametagId: string): Promise<BindingInfo | null> {
-    return this.queryWithFirstSeenWins(
+    return singleOwner(await this.queryNametagClaimants(nametagId), parseBindingInfo);
+  }
+
+  /**
+   * Nametag resolution counts only bindings whose `d` tag is the nametag's hash:
+   * that is the tag a UNIP-01 relay vets ownership of. The filter matches on `t`,
+   * which any author can attach to an event for a different `d`.
+   */
+  private queryNametagClaimants(nametagId: string): Promise<Event[]> {
+    const hashedNametag = NametagUtils.hashNametag(nametagId);
+    return this.queryBindingClaimants(
       createNametagToPubkeyFilter(nametagId),
-      parseBindingInfo,
+      (event) => event.kind === EventKinds.APP_DATA && event.getTagValue('d') === hashedNametag,
+      true,
     );
   }
 
   /**
    * Query for binding info by address (reverse lookup).
    * Supports DIRECT://, PROXY://, alpha1..., or chain pubkey lookups.
-   * Uses first-seen-wins across authors, latest-wins for same author.
+   *
+   * No relay vets who may advertise an address, and the UNIP-01 marker vouches
+   * only for a binding's nametag, so the marker is ignored here: the address
+   * resolves only when exactly one author advertises it.
    * @param address Address string
-   * @returns Promise that resolves with BindingInfo, or null if not found
+   * @returns Promise that resolves with BindingInfo, or null if not found or ambiguous
    */
   async queryBindingByAddress(address: string): Promise<BindingInfo | null> {
-    return this.queryWithFirstSeenWins(
+    const hashedAddress = NametagUtils.hashAddressForTag(address);
+    const claimants = await this.queryBindingClaimants(
       createAddressToBindingFilter(address),
-      parseBindingInfo,
+      (event) => event.kind === EventKinds.APP_DATA && event.getTagValues('t').includes(hashedAddress),
+      false,
     );
+    return singleOwner(claimants, parseBindingInfo);
   }
 
   /**

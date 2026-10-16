@@ -11,7 +11,7 @@
  *      multi-relay clients may still have the same sub_id alive on a
  *      healthy relay; listener-driven unsubscribe() is what cleans the
  *      global entry across all relays.
- *   3. queryWithFirstSeenWins (used by queryPubkeyByNametag /
+ *   3. queryBindingClaimants (used by queryPubkeyByNametag /
  *      queryBindingByNametag / queryBindingByAddress) must settle promptly
  *      on a CLOSED frame instead of waiting for the full query timeout —
  *      otherwise rate-limit rejections look identical to "no data exists".
@@ -347,7 +347,7 @@ describe('Relay resilience fixes (issue #7)', () => {
       // because the filter was unsatisfiable without auth context.
       // Post-auth that's no longer true — the resubscribed REQ
       // might match. We MUST re-arm the local "still waiting" state
-      // so any in-flight queryWithFirstSeenWins doesn't see this
+      // so any in-flight queryBindingClaimants doesn't see this
       // relay as already-done from a stale eosedSubIds marker.
       await connect();
       const subId = client.subscribe(Filter.builder().kinds(1).build(), { onEvent: vi.fn() });
@@ -495,7 +495,7 @@ describe('Relay resilience fixes (issue #7)', () => {
     });
   });
 
-  describe('queryWithFirstSeenWins settles promptly on CLOSED', () => {
+  describe('queryBindingClaimants settles promptly on CLOSED', () => {
     it('resolves null for queryPubkeyByNametag on CLOSED without waiting for query timeout', async () => {
       // Use an overlong timeout so the test would visibly hang if the
       // CLOSED-handling path were broken.
@@ -618,7 +618,7 @@ describe('Relay resilience fixes (issue #7)', () => {
     });
 
     it('relay disconnect mid-query triggers a re-check (no timeout wait)', async () => {
-      // Self-audit invariant + Copilot review: queryWithFirstSeenWins
+      // Self-audit invariant + Copilot review: queryBindingClaimants
       // only re-evaluates allRelaysDoneFor when a listener callback
       // (EOSE / CLOSED → onError) fires. If a relay drops the
       // WebSocket without sending either, the query would otherwise
